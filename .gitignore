@@ -6,3 +6,7 @@ releases/
 build/
 *.ipa
 *.map
+
+# Claude Code
+CLAUDE.md
+.claude/
