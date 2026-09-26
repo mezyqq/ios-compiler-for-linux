@@ -10,7 +10,19 @@
 ./ipab clean MyApp
 ```
 
-Удобно сделать команду глобальной: `ln -s ~/ios-compiler-for-linux/ipab ~/.local/bin/ipab`.
+## Установка
+
+```sh
+git clone https://github.com/mezyqq/ios-compiler-for-linux.git && cd ios-compiler-for-linux
+./setup.sh                              # ~4 ГБ: iOS SDK, Swift для Linux, ldid
+ln -s "$PWD/ipab" ~/.local/bin/ipab     # по желанию: команда ipab из любой папки
+```
+
+Нужны `clang`, `lld`, `make`, `zip`, `curl`, `git`, а для сборки ldid — `libplist` и `openssl`
+(Arch: `pacman -S clang lld libplist openssl`). `setup.sh` скачивает SDK из
+[xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs), Swift с swift.org, собирает
+[ldid](https://github.com/ProcursusTeam/ldid) и применяет к SDK правки из раздела ниже.
+Повторный запуск пропускает то, что уже готово.
 
 ## Проект
 
@@ -40,10 +52,10 @@ MyApp/
 | `runtime/availability.c` | замена compiler-rt для `#available` / `@available` |
 | системный `clang` + `ld64.lld` | компиляция C-семейства и линковка |
 
-## Правки SDK, сделанные при установке
+## Правки SDK (их делает setup.sh)
 
 - **arm64-интерфейсы Swift.** В SDK 26.5 были только arm64e-версии `.swiftinterface`. Из них сгенерированы arm64-копии.
-- **Дамповые `.tbd`.** 27 файлов вида `PrivateFrameworks/*.tbd`, сгенерированных дампером (`flat_namespace`), переименованы в `.tbd.dump`. Они перекрывали настоящие стабы Apple внутри `UIKit.tbd` и других, из-за чего lld не находил символы.
+- **Дамповые `.tbd`.** 28 файлов (в основном `PrivateFrameworks/*.tbd`), сгенерированных дампером (`flat_namespace`), переименованы в `.tbd.dump`. Они перекрывали настоящие стабы Apple внутри `UIKit.tbd` и других, из-за чего lld не находил символы.
 
 ## Ограничения
 
@@ -51,8 +63,3 @@ MyApp/
 - Пути с пробелами не поддерживаются.
 - Минимальная iOS по умолчанию 15.0. Ниже можно, но Swift Concurrency и часть API недоступны.
 
-## Рядом
-
-- `apps/` — проекты, собираемые ipab (например, `apps/Neofetch`).
-- **Forge** (IDE для iPhone) живёт отдельно в `~/forge` и собирается этим ipab: `~/ios-compiler-for-linux/ipab build ~/forge --release`.
-- `~/ios-tweaks` — временный симлинк на эту папку (старое имя). Нужен, пока идёт сборка LLVM в `~/forge/compiler`; после неё его можно удалить.
