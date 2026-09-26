@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# ipab — собирает .ipa из исходников C / C++ / Objective-C / Objective-C++ / Swift на Linux.
+#
+#   ipab new <папка> [objc|swift|swiftui|c]   создать проект из шаблона
+#   ipab build [папка] [--release]            собрать (по умолчанию — текущая папка)
+#   ipab clean [папка]                        удалить build/
+#
+# Сборка инкрементальная: пересобираются только изменённые файлы (через make -j).
+set -euo pipefail
+
+IPAB_HOME=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+TC=$IPAB_HOME/toolchains
+SDK=${IPAB_SDK:-$(ls -d "$IPAB_HOME"/sdks/iPhoneOS*.sdk 2>/dev/null | sort -V | tail -1)}
+SWIFTC=$TC/swift/usr/bin/swiftc
+LDID=$TC/bin/ldid
+CACHE=$IPAB_HOME/cache
+JOBS=${IPAB_JOBS:-$(nproc)}
+
+die() { printf '\033[31mошибка:\033[0m %s\n' "$*" >&2; exit 1; }
+say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+
+# ---------------------------------------------------------------- new
+cmd_new() {
+	local dir=${1:?укажи папку}; local kind=${2:-objc}
+	[ -e "$dir" ] && die "$dir уже существует"
+	local name; name=$(basename "$dir")
+	mkdir -p "$dir/src"  # res/ создаётся при необходимости: ipab без неё обходится
+	cat > "$dir/ipa.conf" <<EOF
+# Конфиг проекта. Это bash — можно использовать переменные.
+NAME="$name"
+BUNDLE_ID="com.example.$(printf '%s' "$name" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')"
+VERSION="1.0"
+BUILD="1"
+MIN_IOS="15.0"
+FRAMEWORKS="Foundation UIKit"   # -framework X
+LIBS=""                         # -lX
+CFLAGS=""                       # для C/C++/ObjC
+SWIFTFLAGS=""
+LDFLAGS=""
+BRIDGING_HEADER=""              # напр. src/Bridging.h — ObjC/C из Swift
+ICON=""                         # напр. res/icon.png (квадрат 1024x1024)
+ENTITLEMENTS=""                 # напр. app.entitlements
+EOF
+	case $kind in
+	objc) cat > "$dir/src/main.m" <<'EOF'
+#import <UIKit/UIKit.h>
+
+@interface AppDelegate : UIResponder <UIApplicationDelegate>
+@property (nonatomic, strong) UIWindow *window;
+@end
+
+@implementation AppDelegate
+- (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
+	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+	UIViewController *vc = [UIViewController new];
+	vc.view.backgroundColor = UIColor.systemBackgroundColor;
+	UILabel *l = [[UILabel alloc] initWithFrame:vc.view.bounds];
+	l.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	l.textAlignment = NSTextAlignmentCenter;
+	l.text = @"Привет из ipab (ObjC)";
+	[vc.view addSubview:l];
+	self.window.rootViewController = vc;
+	[self.window makeKeyAndVisible];
+	return YES;
+}
+@end
+
+int main(int argc, char *argv[]) {
+	@autoreleasepool {
+		return UIApplicationMain(argc, argv, nil, NSStringFromClass(AppDelegate.class));
+	}
+}
+EOF
+	;;
+	swift) cat > "$dir/src/App.swift" <<'EOF'
+import UIKit
+
+@main
+class AppDelegate: UIResponder, UIApplicationDelegate {
+	var window: UIWindow?
+
+	func application(_ app: UIApplication, didFinishLaunchingWithOptions opts: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+		let vc = UIViewController()
+		vc.view.backgroundColor = .systemBackground
+		let l = UILabel(frame: vc.view.bounds)
+		l.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+		l.textAlignment = .center
+		l.text = "Привет из ipab (Swift)"
+		vc.view.addSubview(l)
+		let w = UIWindow(frame: UIScreen.main.bounds)
+		w.rootViewController = vc
+		w.makeKeyAndVisible()
+		window = w
+		return true
+	}
+}
+EOF
+	;;
+	swiftui) sed -i 's/^FRAMEWORKS=.*/FRAMEWORKS="Foundation UIKit SwiftUI"/' "$dir/ipa.conf"
+	cat > "$dir/src/App.swift" <<'EOF'
+import SwiftUI
+
+@main
+struct MyApp: App {
+	@State private var n = 0
+	var body: some Scene {
+		WindowGroup {
+			VStack(spacing: 16) {
+				Text("Привет из ipab (SwiftUI)")
+				Button("Нажато: \(n)") { n += 1 }
+			}
+		}
+	}
+}
+EOF
+	;;
+	c) cat > "$dir/src/main.c" <<'EOF'
+// Чистый C: UIKit через objc runtime.
+#include <objc/runtime.h>
+#include <objc/message.h>
+#include <CoreFoundation/CoreFoundation.h>
+
+extern int UIApplicationMain(int, char **, void *, CFStringRef);
+
+#define MSG(ret, ...) ((ret (*)(id, SEL, ##__VA_ARGS__))objc_msgSend)
+#define CLS(n) ((id)objc_getClass(n))
+#define SEL_(n) sel_registerName(n)
+
+static BOOL did_finish(id self, SEL _cmd, id app, id opts) {
+	id screen = MSG(id)(CLS("UIScreen"), SEL_("mainScreen"));
+	CGRect b = MSG(CGRect)(screen, SEL_("bounds"));
+	id win = MSG(id, CGRect)(MSG(id)(CLS("UIWindow"), SEL_("alloc")), SEL_("initWithFrame:"), b);
+	id vc = MSG(id)(MSG(id)(CLS("UIViewController"), SEL_("alloc")), SEL_("init"));
+	id view = MSG(id)(vc, SEL_("view"));
+	MSG(void, id)(view, SEL_("setBackgroundColor:"), MSG(id)(CLS("UIColor"), SEL_("systemIndigoColor")));
+	MSG(void, id)(win, SEL_("setRootViewController:"), vc);
+	MSG(void)(win, SEL_("makeKeyAndVisible"));
+	object_setInstanceVariable(self, "window", win);
+	return YES;
+}
+
+int main(int argc, char *argv[]) {
+	Class c = objc_allocateClassPair(objc_getClass("UIResponder"), "AppDelegate", 0);
+	class_addIvar(c, "window", sizeof(id), 3, "@");
+	class_addMethod(c, SEL_("application:didFinishLaunchingWithOptions:"), (IMP)did_finish, "B@:@@");
+	objc_registerClassPair(c);
+	return UIApplicationMain(argc, argv, NULL, CFSTR("AppDelegate"));
+}
+EOF
+	;;
+	*) rm -rf "$dir"; die "неизвестный шаблон: $kind (objc|swift|swiftui|c)" ;;
+	esac
+	say "создан $dir ($kind). Сборка: ipab build $dir"
+}
+
+# ---------------------------------------------------------------- build
+plist_escape() { local s=$1; s=${s//&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; printf '%s' "$s"; }
+
+write_info_plist() {
+	local out=$1 sdkver; sdkver=$(basename "$SDK" .sdk); sdkver=${sdkver#iPhoneOS}
+	if [ -f "$PROJ/Info.plist" ]; then cp "$PROJ/Info.plist" "$out"; return; fi
+	local icon=""
+	[ -n "$ICON" ] && icon="	<key>CFBundleIcons</key>
+	<dict><key>CFBundlePrimaryIcon</key><dict>
+		<key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>
+		<key>CFBundleIconName</key><string>AppIcon</string>
+	</dict></dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict><key>CFBundlePrimaryIcon</key><dict>
+		<key>CFBundleIconFiles</key><array><string>AppIcon60x60</string><string>AppIcon76x76</string></array>
+		<key>CFBundleIconName</key><string>AppIcon</string>
+	</dict></dict>"
+	local extra=""
+	[ -f "$PROJ/Info.extra.plist" ] && extra=$(cat "$PROJ/Info.extra.plist")
+	cat > "$out" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>$(plist_escape "$NAME")</string>
+	<key>CFBundleIdentifier</key><string>$(plist_escape "$BUNDLE_ID")</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>$(plist_escape "$NAME")</string>
+	<key>CFBundleDisplayName</key><string>$(plist_escape "${DISPLAY_NAME:-$NAME}")</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>$(plist_escape "$VERSION")</string>
+	<key>CFBundleVersion</key><string>$(plist_escape "$BUILD")</string>
+	<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+	<key>DTPlatformName</key><string>iphoneos</string>
+	<key>DTSDKName</key><string>iphoneos$sdkver</string>
+	<key>DTPlatformVersion</key><string>$sdkver</string>
+	<key>MinimumOSVersion</key><string>$MIN_IOS</string>
+	<key>LSRequiresIPhoneOS</key><true/>
+	<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+	<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+	<key>UILaunchScreen</key><dict/>
+	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+$icon
+$extra
+</dict>
+</plist>
+EOF
+}
+
+cmd_build() {
+	local release=0 arg; PROJ=.
+	for arg; do case $arg in --release|-r) release=1 ;; *) PROJ=$arg ;; esac; done
+	PROJ=$(cd "$PROJ" && pwd)
+	[ -f "$PROJ/ipa.conf" ] || die "нет $PROJ/ipa.conf (создай проект: ipab new <папка>)"
+	[ -d "$SDK" ] || die "не найден iOS SDK в $IPAB_HOME/sdks"
+
+	NAME="" BUNDLE_ID="" VERSION=1.0 BUILD=1 MIN_IOS=15.0 FRAMEWORKS="Foundation UIKit" LIBS=""
+	CFLAGS="" SWIFTFLAGS="" LDFLAGS="" BRIDGING_HEADER="" ICON="" ENTITLEMENTS="" DISPLAY_NAME="" RELEASES=""
+	# shellcheck disable=SC1091
+	. "$PROJ/ipa.conf"
+	[ -n "$NAME" ] || die "NAME пустой в ipa.conf"
+	[ -n "$BUNDLE_ID" ] || die "BUNDLE_ID пустой в ipa.conf"
+	# release: следующая версия (последнее число +1) и номер сборки; в ipa.conf пишем только после успешной сборки
+	if [ $release = 1 ]; then
+		[[ $VERSION =~ ^(.*[^0-9])?([0-9]+)$ ]] && VERSION="${BASH_REMATCH[1]}$((10#${BASH_REMATCH[2]} + 1))"
+		[[ $BUILD =~ ^[0-9]+$ ]] && BUILD=$((BUILD + 1))
+	fi
+
+	local B=$PROJ/build mode=debug; [ $release = 1 ] && mode=release
+	local OBJ=$B/obj/$mode APP=$B/Payload/$NAME.app
+	local MOD; MOD=$(printf '%s' "$NAME" | tr -c '[:alnum:]_\n' '_'); [[ $MOD =~ ^[0-9] ]] && MOD=_$MOD
+	mkdir -p "$OBJ" "$APP" "$CACHE"
+
+	# --- исходники
+	local -a cfam=() swift=()
+	local f
+	while IFS= read -r -d '' f; do
+		case $f in
+		*.c|*.m|*.mm|*.cpp|*.cc|*.cxx) cfam+=("${f#"$PROJ"/}") ;;
+		*.swift) swift+=("${f#"$PROJ"/}") ;;
+		esac
+	done < <(find "$PROJ/src" -type f \( -name '*.c' -o -name '*.m' -o -name '*.mm' -o -name '*.cpp' \
+		-o -name '*.cc' -o -name '*.cxx' -o -name '*.swift' \) -print0 2>/dev/null | sort -z)
+	[ ${#cfam[@]} -gt 0 ] || [ ${#swift[@]} -gt 0 ] || die "в $PROJ/src нет исходников"
+
+	local has_cxx=0 has_objc=0
+	for f in "${cfam[@]}"; do case $f in *.mm|*.cpp|*.cc|*.cxx) has_cxx=1 ;; esac; case $f in *.m|*.mm) has_objc=1 ;; esac; done
+	[ ${#swift[@]} -gt 0 ] && [ ! -x "$SWIFTC" ] && die "есть .swift, но нет тулчейна Swift в $TC/swift"
+
+	local TGT="-target arm64-apple-ios$MIN_IOS -isysroot $SDK"
+	local OPTC="-O0" OPTS="-Onone -incremental -enable-batch-mode -j$JOBS" LDX=""
+	if [ $release = 1 ]; then OPTC="-Os"; OPTS="-O -wmo -num-threads $JOBS"; LDX="-Wl,-dead_strip -Wl,-x"; fi
+	local INC="-I$PROJ/src -I$B/gen"
+	local fw="" x; for x in $FRAMEWORKS; do fw+=" -framework $x"; done
+	for x in $LIBS; do fw+=" -l$x"; done
+
+	# --- stamp-файлы флагов: сменил флаги в ipa.conf — пересоберётся только то, что они затрагивают
+	stamp() { printf '%s\n' "$2" > "$OBJ/$1.tmp"; cmp -s "$OBJ/$1.tmp" "$OBJ/$1" && rm "$OBJ/$1.tmp" || mv "$OBJ/$1.tmp" "$OBJ/$1"; }
+	stamp cflags.stamp "$SDK $TGT $OPTC $INC $CFLAGS"
+	stamp swflags.stamp "$SDK $MIN_IOS $OPTS $SWIFTFLAGS $BRIDGING_HEADER"
+	stamp ldflags.stamp "$SDK $TGT $LDX $FRAMEWORKS $LIBS $LDFLAGS $ENTITLEMENTS"
+
+	# рантайм-заглушка (__isPlatformVersionAtLeast), собирается один раз на SDK
+	local RT; RT=$CACHE/rt/availability-$(basename "$SDK" .sdk).o
+
+	# --- Makefile
+	local MK=$B/Makefile.$mode objs="" swobjs="" swstamp=""
+	{
+		echo "CC := clang"
+		echo "CXX := clang++"
+		echo "BASE := $TGT $OPTC -fmodules -fmodules-cache-path=$CACHE/clang $INC -MMD -MP $CFLAGS"
+		echo ".SUFFIXES:"
+		echo "all: $OBJ/$NAME"
+		if [ ${#swift[@]} -gt 0 ]; then
+			swstamp=$OBJ/swift.stamp
+			local map=$OBJ/swift-map.json parse="-parse-as-library" s
+			for s in "${swift[@]}"; do [ "$(basename "$s")" = main.swift ] && parse=""; done
+			{
+				printf '{"":{"swift-dependencies":"%s/master.swiftdeps"}' "$OBJ"
+				for s in "${swift[@]}"; do
+					printf ',\n"%s":{"object":"%s/%s.o","swift-dependencies":"%s/%s.swiftdeps"}' \
+						"$PROJ/$s" "$OBJ" "$s" "$OBJ" "$s"
+					swobjs+=" $OBJ/$s.o"
+				done
+				echo "}"
+			} > "$map.tmp"
+			cmp -s "$map.tmp" "$map" && rm "$map.tmp" || mv "$map.tmp" "$map"
+			for s in "${swift[@]}"; do mkdir -p "$OBJ/$(dirname "$s")"; done
+			local bh="" hdr=""
+			[ -n "$BRIDGING_HEADER" ] && bh="-import-objc-header $PROJ/$BRIDGING_HEADER"
+			[ $has_objc = 1 ] && hdr="-emit-objc-header-path $B/gen/$MOD-Swift.h"
+			local swsrc=""; for s in "${swift[@]}"; do swsrc+=" $PROJ/$s"; done
+			echo "$swstamp:$swsrc $map $OBJ/swflags.stamp ${BRIDGING_HEADER:+$PROJ/$BRIDGING_HEADER}"
+			printf '\t@echo "  SWIFT  (%s файлов)"\n' "${#swift[@]}"
+			printf '\t@mkdir -p %s\n' "$B/gen"
+			printf '\t@%s -c %s -module-name %s %s -sdk %s -target arm64-apple-ios%s -resource-dir %s -module-cache-path %s -runtime-compatibility-version none -output-file-map %s %s %s %s -I%s/src %s\n' \
+				"$SWIFTC" "$swsrc" "$MOD" "$OPTS" "$SDK" "$MIN_IOS" "$TC/darwin-res" "$CACHE/swift" "$map" "$parse" "$bh" "$hdr" "$PROJ" "$SWIFTFLAGS"
+			printf '\t@touch $@\n'
+		fi
+		for f in "${cfam[@]}"; do
+			local o=$OBJ/$f.o cc='$(CC)' lang=""
+			case $f in
+			*.c) lang="-std=gnu17" ;;
+			*.m) lang="-fobjc-arc" ;;
+			*.mm) cc='$(CXX)'; lang="-fobjc-arc -std=gnu++20" ;;
+			*) cc='$(CXX)'; lang="-std=gnu++20" ;;
+			esac
+			# ObjC-файлы в смешанном проекте ждут сгенерированный <Модуль>-Swift.h
+			local dep=""; case $f in *.m|*.mm) [ -n "$swstamp" ] && dep=" | $swstamp" ;; esac
+			echo "$o: $PROJ/$f $OBJ/cflags.stamp$dep"
+			printf '\t@echo "  CC     %s"\n' "$f"
+			printf '\t@mkdir -p %s\n' "$(dirname "$o")"
+			printf '\t@%s $(BASE) %s -c %s -o $@\n' "$cc" "$lang" "$PROJ/$f"
+			echo "-include $OBJ/$f.d"
+			objs+=" $o"
+		done
+		local linker='$(CC)'; [ $has_cxx = 1 ] && linker='$(CXX)'
+		local swl=""; [ ${#swift[@]} -gt 0 ] && swl="-L$SDK/usr/lib/swift -Wl,-rpath,/usr/lib/swift"
+		local ent=""; [ -n "$ENTITLEMENTS" ] && ent=$PROJ/$ENTITLEMENTS
+		echo "$RT: $IPAB_HOME/runtime/availability.c"
+		printf '\t@mkdir -p %s\n' "$CACHE/rt"
+		printf '\t@clang -target arm64-apple-ios12.0 -isysroot %s -O2 -c $< -o $@\n' "$SDK"
+		echo "$OBJ/$NAME:$objs $swstamp $RT $OBJ/ldflags.stamp $ent"
+		printf '\t@echo "  LD     %s"\n' "$NAME"
+		printf '\t@%s %s -fuse-ld=lld %s %s %s %s -Wl,-rpath,@executable_path/Frameworks %s %s %s -o $@\n' \
+			"$linker" "$TGT" "$LDX" "$objs" "$swobjs" "$RT" "$swl" "$fw" "$LDFLAGS"
+		[ -x "$LDID" ] && printf '\t@%s -S%s $@\n' "$LDID" "$ent"
+	} > "$MK.tmp"
+	cmp -s "$MK.tmp" "$MK" && rm "$MK.tmp" || mv "$MK.tmp" "$MK"
+
+	say "сборка $NAME ($mode, $JOBS потоков)"
+	make -s -f "$MK" -j"$JOBS" || die "компиляция не удалась"
+
+	# --- бандл (копируем только изменившееся, чтобы zip не перепаковывал лишнее)
+	cmp -s "$OBJ/$NAME" "$APP/$NAME" || cp "$OBJ/$NAME" "$APP/$NAME"
+	write_info_plist "$B/Info.plist.tmp"
+	cmp -s "$B/Info.plist.tmp" "$APP/Info.plist" && rm "$B/Info.plist.tmp" || mv "$B/Info.plist.tmp" "$APP/Info.plist"
+	[ -f "$APP/PkgInfo" ] || printf 'APPL????' > "$APP/PkgInfo"
+	if [ -d "$PROJ/res" ] && [ -n "$(ls -A "$PROJ/res")" ]; then cp -a -u "$PROJ/res/." "$APP/"; fi
+	if [ -n "$ICON" ]; then
+		[ -f "$PROJ/$ICON" ] || die "нет иконки $ICON"
+		for x in AppIcon60x60@2x AppIcon60x60@3x AppIcon76x76@2x; do cp -u "$PROJ/$ICON" "$APP/$x.png"; done
+	fi
+	# --- .ipa
+	local IPA=$B/$NAME.ipa
+	(cd "$B" && zip -q -r -FS -1 -X "$IPA" Payload) || die "zip не удался"
+	say "готово: $IPA ($(du -h "$IPA" | cut -f1))"
+	# release: записываем новую версию в ipa.conf, в releases/ остаётся только свежий <имя>-<версия>.ipa
+	if [ $release = 1 ]; then
+		sed -i "s/^VERSION=\"[^\"]*\"/VERSION=\"$VERSION\"/; s/^BUILD=\"[^\"]*\"/BUILD=\"$BUILD\"/" "$PROJ/ipa.conf"
+		local REL=${RELEASES:-$IPAB_HOME/releases}
+		mkdir -p "$REL"
+		rm -f "$REL/$NAME-"[0-9]*.ipa "$REL/$NAME-"[0-9]*.map "$REL/$NAME-latest.ipa"
+		cp "$IPA" "$REL/$NAME-$VERSION.ipa"
+		# карта символов (если проект пишет её через LDFLAGS=-Wl,-map,…) — для расшифровки отчётов о вылетах
+		[ -f "$B/$NAME.map" ] && cp "$B/$NAME.map" "$REL/$NAME-$VERSION.map"
+		say "релиз $VERSION (сборка $BUILD): $REL/$NAME-$VERSION.ipa"
+	fi
+}
+
+cmd_clean() { local p=${1:-.}; rm -rf "$p/build"; say "очищено $p/build"; }
+
+case ${1:-} in
+new) shift; cmd_new "$@" ;;
+build|b) shift; cmd_build "$@" ;;
+clean) shift; cmd_clean "$@" ;;
+*) sed -n '2,8s/^# \{0,1\}//p' "$0"; exit 1 ;;
+esac

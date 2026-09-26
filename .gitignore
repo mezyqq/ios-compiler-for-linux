@@ -1,0 +1,8 @@
+# тяжёлое / скачивается отдельно
+sdks/
+cache/
+toolchains/
+releases/
+build/
+*.ipa
+*.map
