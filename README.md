@@ -40,7 +40,7 @@ MyApp/
 - **Swift + ObjC in one project.** Set `BRIDGING_HEADER` and Swift sees whatever that header imports. ObjC sees Swift through `#import "<Name>-Swift.h"`.
 - **Icon:** `ICON="res/icon.png"`, a 1024×1024 square.
 - **Extra resources:** `EXTRA_RES="assets data/db"` — these project folders and files are copied to the `.app` root under their own names (in addition to the contents of `res/`).
-- **Releases.** `--release` bumps `VERSION` and `BUILD` in `ipa.conf` after a successful build and puts the `.ipa` into `releases/` of the ipab folder (the project's previous release is removed). Set your own folder in `ipa.conf`: `RELEASES="$PROJ/releases"`. If the project writes a symbol map (`LDFLAGS="-Wl,-map,$PROJ/build/$NAME.map"`), it is copied to the releases too, for decoding crash reports.
+- **Releases.** `--release` bumps `VERSION` and `BUILD` in `ipa.conf` after a successful build and puts the `.ipa` into `releases/` of the ipab folder (the project's previous release is removed). Set your own folder in `ipa.conf`: `RELEASES="$PROJ/releases"`. If the project writes a symbol map (`LDFLAGS="-Wl,-map,$PROJ/build/$NAME.map"`), it is copied to the releases too, for decoding crash reports. To jump to a specific version instead of +1: `IPAB_VERSION=1.0 ipab build --release`.
 - **Speed.** `make -j` on all cores with incremental builds; module caches in `cache/` are shared by all projects. The first Swift/SwiftUI build on a new SDK takes about 40 s while the cache is built. After that an empty rebuild takes ~30 ms and editing one file ~0.3 s.
   Set the number of jobs with `IPAB_JOBS=2 ipab build`.
 

@@ -231,7 +231,9 @@ cmd_build() {
 	[ -n "$BUNDLE_ID" ] || die "BUNDLE_ID пустой в ipa.conf"
 	# release: следующая версия (последнее число +1) и номер сборки; в ipa.conf пишем только после успешной сборки
 	if [ $release = 1 ]; then
-		[[ $VERSION =~ ^(.*[^0-9])?([0-9]+)$ ]] && VERSION="${BASH_REMATCH[1]}$((10#${BASH_REMATCH[2]} + 1))"
+		# IPAB_VERSION=1.0 — задать версию явно (например, переход 0.9.x → 1.0), иначе последнее число +1
+		if [ -n "${IPAB_VERSION:-}" ]; then VERSION=$IPAB_VERSION
+		elif [[ $VERSION =~ ^(.*[^0-9])?([0-9]+)$ ]]; then VERSION="${BASH_REMATCH[1]}$((10#${BASH_REMATCH[2]} + 1))"; fi
 		[[ $BUILD =~ ^[0-9]+$ ]] && BUILD=$((BUILD + 1))
 	fi
 
