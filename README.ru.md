@@ -70,3 +70,7 @@ MyApp/
 ## Смотри также
 
 [ios-compiler](https://github.com/mezyqq/ios-compiler) — clang и lld, работающие на самом iPhone: собирают C / ObjC / C++ приложения в `.ipa` прямо на телефоне (использует SDK, установленный ipab).
+
+## Лицензия
+
+GNU General Public License v3.0 — см. [LICENSE](LICENSE).
