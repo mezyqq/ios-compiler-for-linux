@@ -1,66 +1,71 @@
-# ipab — сборка .ipa на Linux
+**English** · [Русский](README.ru.md)
 
-Собирает iOS-приложения из C, C++, Objective-C, Objective-C++ и Swift (включая SwiftUI) без Mac и Xcode.
-Готовую `.ipa` ставишь через iloader: он переподписывает её твоим Apple ID.
+# ipab — build iOS .ipa on Linux
+
+Builds iOS apps from C, C++, Objective-C, Objective-C++ and Swift (including SwiftUI) without a Mac or Xcode.
+Install the resulting `.ipa` with a sideloading tool such as iloader, which re-signs it with your Apple ID.
 
 ```sh
-./ipab new MyApp swift        # шаблоны: objc | swift | swiftui | c
+./ipab new MyApp swift        # templates: objc | swift | swiftui | c
 ./ipab build MyApp            # debug → MyApp/build/MyApp.ipa
-./ipab build MyApp --release  # -Os / -O -wmo, dead_strip → версия +1, releases/<Имя>-<версия>.ipa (прошлый релиз удаляется)
+./ipab build MyApp --release  # -Os / -O -wmo, dead_strip → version +1, releases/<Name>-<version>.ipa (previous release is removed)
 ./ipab clean MyApp
 ```
 
-## Установка
+## Installation
 
 ```sh
 git clone https://github.com/mezyqq/ios-compiler-for-linux.git && cd ios-compiler-for-linux
-./setup.sh                              # ~4 ГБ: iOS SDK, Swift для Linux, ldid
-ln -s "$PWD/ipab" ~/.local/bin/ipab     # по желанию: команда ipab из любой папки
+./setup.sh                              # ~4 GB: iOS SDK, Swift for Linux, ldid
+ln -s "$PWD/ipab" ~/.local/bin/ipab     # optional: run ipab from any directory
 ```
 
-Нужны `clang`, `lld`, `make`, `zip`, `curl`, `git`, а для сборки ldid — `libplist` и `openssl`
-(Arch: `pacman -S clang lld libplist openssl`). `setup.sh` скачивает SDK из
-[xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs), Swift с swift.org, собирает
-[ldid](https://github.com/ProcursusTeam/ldid) и применяет к SDK правки из раздела ниже.
-Повторный запуск пропускает то, что уже готово.
+Requires `clang`, `lld`, `make`, `zip`, `curl`, `git`, plus `libplist` and `openssl` to build ldid
+(Arch: `pacman -S clang lld libplist openssl`). `setup.sh` downloads the SDK from
+[xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs) and Swift from swift.org, builds
+[ldid](https://github.com/ProcursusTeam/ldid) and applies the SDK fixes described below.
+Re-running it skips whatever is already done.
 
-## Проект
+## Project
 
 ```
 MyApp/
-  ipa.conf            имя, bundle id, MIN_IOS, фреймворки, флаги (это bash)
-  src/                все .c .m .mm .cpp .cc .cxx .swift, рекурсивно
-  res/                необязательно: копируется в корень .app как есть (картинки, json, шрифты…)
-  Info.plist          необязательно: если есть, используется вместо сгенерированного
-  Info.extra.plist    необязательно: дополнительные ключи, вставляются в сгенерированный
+  ipa.conf            name, bundle id, MIN_IOS, frameworks, flags (it is bash)
+  src/                all .c .m .mm .cpp .cc .cxx .swift files, recursively
+  res/                optional: copied to the .app root as is (images, json, fonts…)
+  Info.plist          optional: used instead of the generated one
+  Info.extra.plist    optional: extra keys spliced into the generated one
 ```
 
-- **Swift + ObjC в одном проекте.** Если в `BRIDGING_HEADER` указан заголовок, из Swift видно то, что он импортирует. Из ObjC Swift виден через `#import "<Имя>-Swift.h"`.
-- **Иконка:** `ICON="res/icon.png"`, квадрат 1024×1024.
-- **Дополнительные ресурсы:** `EXTRA_RES="assets data/db"` — эти папки и файлы проекта кладутся в корень `.app` под своими именами (в дополнение к содержимому `res/`).
-- **Релизы.** `--release` повышает `VERSION` и `BUILD` в `ipa.conf` после успешной сборки и кладёт `.ipa` в `releases/` этой папки (прошлый релиз проекта удаляется). Свою папку можно задать в `ipa.conf`: `RELEASES="$PROJ/releases"`. Если проект пишет карту символов (`LDFLAGS="-Wl,-map,$PROJ/build/$NAME.map"`), она тоже копируется в релизы — для расшифровки отчётов о вылетах.
-- **Скорость.** Работает `make -j` (все ядра) с инкрементальной сборкой, а кэши модулей в `cache/` общие для всех проектов. Первая сборка Swift/SwiftUI на новом SDK долгая, около 40 с, пока строится кэш. Дальше пустая пересборка занимает ~30 мс, правка одного файла ~0.3 с.
-  Число потоков задаёт `IPAB_JOBS=2 ipab build`.
+- **Swift + ObjC in one project.** Set `BRIDGING_HEADER` and Swift sees whatever that header imports. ObjC sees Swift through `#import "<Name>-Swift.h"`.
+- **Icon:** `ICON="res/icon.png"`, a 1024×1024 square.
+- **Extra resources:** `EXTRA_RES="assets data/db"` — these project folders and files are copied to the `.app` root under their own names (in addition to the contents of `res/`).
+- **Releases.** `--release` bumps `VERSION` and `BUILD` in `ipa.conf` after a successful build and puts the `.ipa` into `releases/` of the ipab folder (the project's previous release is removed). Set your own folder in `ipa.conf`: `RELEASES="$PROJ/releases"`. If the project writes a symbol map (`LDFLAGS="-Wl,-map,$PROJ/build/$NAME.map"`), it is copied to the releases too, for decoding crash reports.
+- **Speed.** `make -j` on all cores with incremental builds; module caches in `cache/` are shared by all projects. The first Swift/SwiftUI build on a new SDK takes about 40 s while the cache is built. After that an empty rebuild takes ~30 ms and editing one file ~0.3 s.
+  Set the number of jobs with `IPAB_JOBS=2 ipab build`.
 
-## Что внутри
+## What's inside
 
 | | |
 |---|---|
-| `sdks/iPhoneOS26.5.sdk` | iOS SDK (используется новейший из `sdks/`, другой можно выбрать через `IPAB_SDK=...`) |
-| `toolchains/swift` | Swift 6.4 для Linux (swift.org) |
-| `toolchains/darwin-res` | resource-dir Swift для Darwin: clang-заголовки, shims, apinotes |
-| `toolchains/bin/ldid` | ad-hoc подпись |
-| `runtime/availability.c` | замена compiler-rt для `#available` / `@available` |
-| системный `clang` + `ld64.lld` | компиляция C-семейства и линковка |
+| `sdks/iPhoneOS26.5.sdk` | iOS SDK (the newest one in `sdks/` is used; pick another with `IPAB_SDK=...`) |
+| `toolchains/swift` | Swift 6.4 for Linux (swift.org) |
+| `toolchains/darwin-res` | Swift resource-dir for Darwin: clang headers, shims, apinotes |
+| `toolchains/bin/ldid` | ad-hoc signing |
+| `runtime/availability.c` | compiler-rt replacement for `#available` / `@available` |
+| system `clang` + `ld64.lld` | compiling the C family and linking |
 
-## Правки SDK (их делает setup.sh)
+## SDK fixes (applied by setup.sh)
 
-- **arm64-интерфейсы Swift.** В SDK 26.5 были только arm64e-версии `.swiftinterface`. Из них сгенерированы arm64-копии.
-- **Дамповые `.tbd`.** 28 файлов (в основном `PrivateFrameworks/*.tbd`), сгенерированных дампером (`flat_namespace`), переименованы в `.tbd.dump`. Они перекрывали настоящие стабы Apple внутри `UIKit.tbd` и других, из-за чего lld не находил символы.
+- **arm64 Swift interfaces.** SDK 26.5 ships only arm64e `.swiftinterface` files; arm64 copies are generated from them.
+- **Dumped `.tbd` files.** 28 files (mostly `PrivateFrameworks/*.tbd`) produced by a dumper (`flat_namespace`) are renamed to `.tbd.dump`. They shadowed Apple's real stubs inside `UIKit.tbd` and others, so lld could not find symbols.
 
-## Ограничения
+## Limitations
 
-- Нет `actool`/`ibtool`, поэтому `.xcassets`, `.storyboard` и `.xib` не компилируются. Интерфейс делай кодом (UIKit/SwiftUI), иконку — PNG.
-- Пути с пробелами не поддерживаются.
-- Минимальная iOS по умолчанию 15.0. Ниже можно, но Swift Concurrency и часть API недоступны.
+- No `actool`/`ibtool`, so `.xcassets`, `.storyboard` and `.xib` are not compiled. Build the UI in code (UIKit/SwiftUI) and use a PNG icon.
+- Paths with spaces are not supported.
+- Default minimum iOS is 15.0. Lower works, but Swift Concurrency and some APIs are unavailable.
 
+## See also
+
+[ios-compiler](https://github.com/mezyqq/ios-compiler) — clang and lld running on the iPhone itself: builds C / ObjC / C++ apps into an `.ipa` right on the device (uses the SDK installed by ipab).
