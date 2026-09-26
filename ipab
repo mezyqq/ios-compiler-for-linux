@@ -224,7 +224,7 @@ cmd_build() {
 	[ -d "$SDK" ] || die "не найден iOS SDK в $IPAB_HOME/sdks"
 
 	NAME="" BUNDLE_ID="" VERSION=1.0 BUILD=1 MIN_IOS=15.0 FRAMEWORKS="Foundation UIKit" LIBS=""
-	CFLAGS="" SWIFTFLAGS="" LDFLAGS="" BRIDGING_HEADER="" ICON="" ENTITLEMENTS="" DISPLAY_NAME="" RELEASES=""
+	CFLAGS="" SWIFTFLAGS="" LDFLAGS="" BRIDGING_HEADER="" ICON="" ENTITLEMENTS="" DISPLAY_NAME="" RELEASES="" EXTRA_RES=""
 	# shellcheck disable=SC1091
 	. "$PROJ/ipa.conf"
 	[ -n "$NAME" ] || die "NAME пустой в ipa.conf"
@@ -346,6 +346,11 @@ cmd_build() {
 	cmp -s "$B/Info.plist.tmp" "$APP/Info.plist" && rm "$B/Info.plist.tmp" || mv "$B/Info.plist.tmp" "$APP/Info.plist"
 	[ -f "$APP/PkgInfo" ] || printf 'APPL????' > "$APP/PkgInfo"
 	if [ -d "$PROJ/res" ] && [ -n "$(ls -A "$PROJ/res")" ]; then cp -a -u "$PROJ/res/." "$APP/"; fi
+	# EXTRA_RES: ещё папки/файлы проекта, кладутся в корень .app под своим именем
+	for x in $EXTRA_RES; do
+		[ -e "$PROJ/$x" ] || die "нет $x (EXTRA_RES)"
+		cp -a -u "$PROJ/$x" "$APP/"
+	done
 	if [ -n "$ICON" ]; then
 		[ -f "$PROJ/$ICON" ] || die "нет иконки $ICON"
 		for x in AppIcon60x60@2x AppIcon60x60@3x AppIcon76x76@2x; do cp -u "$PROJ/$ICON" "$APP/$x.png"; done
