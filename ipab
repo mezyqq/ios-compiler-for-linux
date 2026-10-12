@@ -474,7 +474,7 @@ write_manifest_makefile() {
 	{
 		awk -v SRCROOT="$SRC" -v EXT="$EXT" -v GEN="$GEN" -v B="$OBJ" -v SWIFTC="$SWIFTC" -v TCRES="$TC/darwin-res" \
 			-v SDK="$SDK" -v MINIOS="$MIN_IOS" -v CACHE="$CACHE" -v OPTC="$OPTC $CFLAGS" -v OPTS="$OPTS $SWIFTFLAGS" \
-			-v SWIFT_THREADS="$SWIFT_THREADS" -v ROOTS="$ROOTS" -v OUT="$OBJ/$NAME" -v RTOBJ="$RT" \
+			-v SWIFT_THREADS="$SWIFT_THREADS" -v SWIFT_BATCH_JOBS="$JOBS" -v ROOTS="$ROOTS" -v OUT="$OBJ/$NAME" -v RTOBJ="$RT" \
 			-v LDID="$([ -x "$LDID" ] && echo "$LDID")" -v ENT="$ent" -v LDFLAGS="$LDFLAGS" -v AR="$TC/llvm-native/bin/llvm-ar" \
 			-f "$IPAB_HOME/manifest.awk" "$PROJ/$MANIFEST" || die "не удалось разобрать манифест"
 		echo "$RT: $IPAB_HOME/runtime/availability.c"

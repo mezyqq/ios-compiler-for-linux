@@ -7,7 +7,7 @@
 # Paths: "pkg/file" (in SRCROOT), "@ext/<repo>/file" (EXT), "@gen/..." (GEN). File lists (srcs hdrs
 # data textual_hdrs) are separated by "|", other lists by spaces.
 #
-# Variables (-v): SRCROOT EXT GEN B SWIFTC TCRES SDK MINIOS CACHE OPTC OPTS SWIFT_THREADS ROOTS OUT RTOBJ LDID ENT LDFLAGS AR
+# Variables (-v): SRCROOT EXT GEN B SWIFTC TCRES SDK MINIOS CACHE OPTC OPTS SWIFT_THREADS SWIFT_BATCH_JOBS ROOTS OUT RTOBJ LDID ENT LDFLAGS AR
 #
 # Output: Makefile on stdout (run with `make -C $SRCROOT`), plus module maps and output file maps under $B.
 #   - ObjC / C / C++ files compile one object per source (-MMD header deps), never depend on Swift.
@@ -139,6 +139,13 @@ function fwparent(i,    d) {
     return d
 }
 
+# Big modules (debug): batch mode type-checks files on all cores (-wmo type-checks on one);
+# small modules and release builds: whole-module.
+function swiftmode(nsrc) {
+    if (OPTS !~ /-Onone/ || nsrc < 150) return " -wmo -num-threads " SWIFT_THREADS
+    return " -enable-batch-mode -j" SWIFT_BATCH_JOBS
+}
+
 function isswift(i) { return kind[i] == "swift_library" }
 function iscfam(i) { return kind[i] == "objc_library" || kind[i] == "cc_library" }
 
@@ -175,7 +182,8 @@ function cleancopts(s,    a, m, k, out) {
 function modmap(i) { return B "/modulemaps/" modname[i] ".modulemap" }
 
 function writemodmap(i,    f, a, m, k) {
-    f = modmap(i)
+    # written via .tmp + cmp: an unchanged map keeps its mtime (Swift modules depend on it)
+    f = modmap(i) ".tmp"
     printf "module \"%s\" {\n    export *\n", modname[i] > f
     m = split(hdrs[i], a, "|")
     for (k = 1; k <= m; k++) if (a[k] ~ /\.(h|hh|hpp)$/) printf "    header \"%s\"\n", rp(a[k]) > f
@@ -183,6 +191,7 @@ function writemodmap(i,    f, a, m, k) {
     for (k = 1; k <= m; k++) printf "    textual header \"%s\"\n", rp(a[k]) > f
     print "}" > f
     close(f)
+    system("cmp -s '" f "' '" modmap(i) "' && rm -f '" f "' || mv -f '" f "' '" modmap(i) "'")
 }
 
 END {
@@ -285,6 +294,8 @@ END {
             srclist = ""
             objlist = ""
             depfiles = ""
+            ofmfinal = ofm
+            ofm = ofm ".tmp"
             printf "{\"\":{\"swift-dependencies\":\"%s/master.swiftdeps\"}", dir > ofm
             ms = split(srcs[i], sa, "|")
             for (k = 1; k <= ms; k++) {
@@ -298,6 +309,9 @@ END {
             }
             print "}" > ofm
             close(ofm)
+            system("cmp -s '" ofm "' '" ofmfinal "' && rm -f '" ofm "' || mv -f '" ofm "' '" ofmfinal "'")
+            ofm = ofmfinal
+            nsrc = split(srclist, tmpsrc, " ")
             if (srclist == "") continue
             for (q = 1; q <= c; q++) {
                 d = tparts[q]
@@ -311,7 +325,7 @@ END {
             print "\t@echo '  SWIFT  " mname "'"
             print "\t@mkdir -p " dir " " B "/mods"
             print "\t@" SWIFTC " -c -parse-as-library -module-name " mname " -emit-module-path " B "/mods/" mname ".swiftmodule" \
-                  " -output-file-map " ofm " " OPTS " -wmo -num-threads " SWIFT_THREADS \
+                  " -output-file-map " ofm " " OPTS swiftmode(nsrc) \
                   " -sdk " SDK " -target arm64-apple-ios" MINIOS " -resource-dir " TCRES \
                   " -module-cache-path " CACHE "/swift -runtime-compatibility-version none -Xfrontend -enable-cross-import-overlays -I " B "/mods" fwctx \
                   cleancopts(copts[i]) xcc srclist
