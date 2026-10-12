@@ -206,7 +206,8 @@ END {
                 print o ": " src " " B "/cflags.stamp"
                 print "\t@echo '  CC     " s "'"
                 print "\t@mkdir -p $(dir $@)"
-                print "\t@" cc " " base lang mods own " " co extra " -c " src " -o $@"
+                # clang modules only for ObjC: in ObjC++ (with C++20+) they hide parts of Foundation
+                print "\t@" cc " " base lang (s ~ /\.m$/ ? mods : "") own " " co extra " -c " src " -o $@"
                 print "-include " substr(o, 1, length(o) - 2) ".d"
                 linklist = linklist " " o
                 libobjs = libobjs " " o
@@ -254,7 +255,7 @@ END {
             print "\t@" SWIFTC " -c -parse-as-library -module-name " mname " -emit-module-path " B "/mods/" mname ".swiftmodule" \
                   " -output-file-map " ofm " " OPTS " -wmo -num-threads " SWIFT_THREADS \
                   " -sdk " SDK " -target arm64-apple-ios" MINIOS " -resource-dir " TCRES \
-                  " -module-cache-path " CACHE "/swift -runtime-compatibility-version none -I " B "/mods" \
+                  " -module-cache-path " CACHE "/swift -runtime-compatibility-version none -Xfrontend -enable-cross-import-overlays -I " B "/mods" \
                   cleancopts(copts[i]) xcc srclist
             print "\t@touch $@"
             # The objects are produced by the module's swiftc call.

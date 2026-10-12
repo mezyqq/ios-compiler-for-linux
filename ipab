@@ -308,7 +308,7 @@ cmd_build() {
 			echo "$swstamp:$swsrc $map $OBJ/swflags.stamp ${BRIDGING_HEADER:+$PROJ/$BRIDGING_HEADER}"
 			printf '\t@echo "  SWIFT  (%s файлов)"\n' "${#swift[@]}"
 			printf '\t@mkdir -p %s\n' "$B/gen"
-			printf '\t@%s -c %s -module-name %s %s -sdk %s -target arm64-apple-ios%s -resource-dir %s -module-cache-path %s -runtime-compatibility-version none -output-file-map %s %s %s %s -I%s/src %s\n' \
+			printf '\t@%s -c %s -module-name %s %s -sdk %s -target arm64-apple-ios%s -resource-dir %s -module-cache-path %s -runtime-compatibility-version none -Xfrontend -enable-cross-import-overlays -output-file-map %s %s %s %s -I%s/src %s\n' \
 				"$SWIFTC" "$swsrc" "$MOD" "$OPTS" "$SDK" "$MIN_IOS" "$TC/darwin-res" "$CACHE/swift" "$map" "$parse" "$bh" "$hdr" "$PROJ" "$SWIFTFLAGS"
 			printf '\t@touch $@\n'
 		fi
