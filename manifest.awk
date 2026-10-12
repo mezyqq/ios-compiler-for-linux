@@ -4,7 +4,8 @@
 #   1 kind (swift_library|objc_library|cc_library)  2 label  3 module_name  4 srcs  5 hdrs  6 deps
 #   7 copts  8 includes  9 defines  10 sdk_frameworks  11 sdk_dylibs  12 enable_modules  13 data
 #   14 textual_hdrs  15 cxxopts  16 weak_sdk_frameworks  17 linkopts  18 package
-# Paths: "pkg/file" (in SRCROOT), "@ext/<repo>/file" (EXT), "@gen/..." (GEN). Lists are space separated.
+# Paths: "pkg/file" (in SRCROOT), "@ext/<repo>/file" (EXT), "@gen/..." (GEN). File lists (srcs hdrs
+# data textual_hdrs) are separated by "|", other lists by spaces.
 #
 # Variables (-v): SRCROOT EXT GEN B SWIFTC TCRES SDK MINIOS CACHE OPTC OPTS SWIFT_THREADS ROOTS OUT RTOBJ LDID ENT LDFLAGS AR
 #
@@ -44,10 +45,53 @@ BEGIN {
     pkg[n] = $18
 }
 
-function rp(p) {
-    if (substr(p, 1, 5) == "@gen/") return GEN "/" substr(p, 6)
-    if (substr(p, 1, 5) == "@ext/") return EXT "/" substr(p, 6)
-    return SRCROOT "/" p
+function rp(p,    r, s, d) {
+    if (substr(p, 1, 5) == "@gen/") r = GEN "/" substr(p, 6)
+    else if (substr(p, 1, 5) == "@ext/") r = EXT "/" substr(p, 6)
+    else r = SRCROOT "/" p
+    # make can't handle spaces in file names: such files are used through a symlink
+    if (r ~ / /) {
+        s = r
+        gsub(/ /, "_", s)
+        s = B "/nospace" s
+        if (!(s in nospace)) {
+            nospace[s] = 1
+            d = s
+            sub(/\/[^\/]*$/, "", d)
+            system("mkdir -p '" d "' && ln -sfn '" r "' '" s "'")
+        }
+        return s
+    }
+    return r
+}
+
+
+# Bazel tokenizes copts/defines with Bourne shell rules ("\"" -> ", quotes removed, spaces split);
+# the resulting arguments are single-quoted again for the recipe (and $ doubled for make).
+function shellargs(s,    i, c, n, tok, q, intok, out) {
+    out = ""; tok = ""; q = ""; intok = 0; n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (q == "'") { if (c == "'") q = ""; else tok = tok c; continue }
+        if (q == "\"") {
+            if (c == "\"") { q = ""; continue }
+            if (c == "\\" && i < n && index("\"\\$`", substr(s, i + 1, 1))) { i++; tok = tok substr(s, i, 1); continue }
+            tok = tok c; continue
+        }
+        if (c == "\\" && i < n) { i++; tok = tok substr(s, i, 1); intok = 1; continue }
+        if (c == "'" || c == "\"") { q = c; intok = 1; continue }
+        if (c == " " || c == "\t") { if (intok) { out = out " " quote(tok); tok = ""; intok = 0 }; continue }
+        tok = tok c; intok = 1
+    }
+    if (intok) out = out " " quote(tok)
+    return out
+}
+
+function quote(t) {
+    if (t ~ /^[A-Za-z0-9_@%+=:,.\/-]+$/) return t
+    gsub(/'/, "'\\''", t)
+    gsub(/\$/, "$$", t)
+    return "'" t "'"
 }
 
 function sanitize(s,    r) {
@@ -88,6 +132,13 @@ function closure(i,    a, m, k, d, j, r, seen, out, parts, c, q) {
     return out
 }
 
+# directory containing a prebuilt <Name>.framework (for -F)
+function fwparent(i,    d) {
+    d = rp(srcs[i])
+    sub(/\/[^\/]*$/, "", d)
+    return d
+}
+
 function isswift(i) { return kind[i] == "swift_library" }
 function iscfam(i) { return kind[i] == "objc_library" || kind[i] == "cc_library" }
 
@@ -106,16 +157,16 @@ function incflags(i,    a, m, k, d, out) {
 function defflags(i,    a, m, k, out) {
     out = ""
     m = split(defs[i], a, " ")
-    for (k = 1; k <= m; k++) out = out " -D" a[k]
+    for (k = 1; k <= m; k++) out = out shellargs("-D" a[k])
     return out
 }
 
 # Drops options that only make sense for Bazel or that turn this compiler's new warnings into errors.
 function cleancopts(s,    a, m, k, out) {
     out = ""
-    m = split(s, a, " ")
+    m = split(shellargs(s), a, " ")
     for (k = 1; k <= m; k++) {
-        if (a[k] == "-warnings-as-errors" || a[k] == "-Werror") continue
+        if (a[k] == "-warnings-as-errors" || a[k] == "-Werror" || a[k] == "") continue
         out = out " " a[k]
     }
     return out
@@ -126,9 +177,9 @@ function modmap(i) { return B "/modulemaps/" modname[i] ".modulemap" }
 function writemodmap(i,    f, a, m, k) {
     f = modmap(i)
     printf "module \"%s\" {\n    export *\n", modname[i] > f
-    m = split(hdrs[i], a, " ")
+    m = split(hdrs[i], a, "|")
     for (k = 1; k <= m; k++) if (a[k] ~ /\.(h|hh|hpp)$/) printf "    header \"%s\"\n", rp(a[k]) > f
-    m = split(txthdrs[i], a, " ")
+    m = split(txthdrs[i], a, "|")
     for (k = 1; k <= m; k++) printf "    textual header \"%s\"\n", rp(a[k]) > f
     print "}" > f
     close(f)
@@ -169,16 +220,23 @@ END {
         ctx = ""
         maps = ""
         mapfiles = ""
+        fwctx = ""
         for (q = 1; q <= c; q++) {
             d = tparts[q]
+            if (kind[d] == "xcframework") { fwctx = fwctx " -F" fwparent(d); continue }
             if (!iscfam(d)) continue
             ctx = ctx incflags(d) defflags(d)
             if (d in hasmap) { maps = maps " -fmodule-map-file=" modmap(d); mapfiles = mapfiles " " modmap(d) }
         }
 
+        if (kind[i] == "xcframework") {
+            linklist = linklist " " rp(srcs[i]) "/" modname[i]
+            linkfw = linkfw " -F" fwparent(i)
+            continue
+        }
         if (iscfam(i)) {
             base = "-target arm64-apple-ios" MINIOS " -isysroot " SDK " " OPTC " -iquote " SRCROOT " -iquote " GEN " -MMD -MP"
-            own = incflags(i) defflags(i) ctx
+            own = incflags(i) defflags(i) ctx fwctx
             objc = kind[i] == "objc_library"
             mods = ""
             # Module maps of dependencies are for Swift only: C-family code includes their headers
@@ -187,14 +245,14 @@ END {
             co = cleancopts(copts[i])
             cxo = cleancopts(cxxopts[i])
             libobjs = ""
-            ms = split(srcs[i], sa, " ")
+            ms = split(srcs[i], sa, "|")
             for (k = 1; k <= ms; k++) {
                 s = sa[k]
                 if (s ~ /\.a$/) { linklist = linklist " " rp(s); continue }
                 if (s !~ /\.(c|m|mm|cc|cpp|cxx|S|s)$/) continue
                 src = rp(s)
                 o = B "/o/" id "/" s ".o"
-                gsub(/@/, "_", o)
+                gsub(/[@ ]/, "_", o)
                 lang = ""
                 cc = "clang"
                 if (s ~ /\.c$/) lang = ""
@@ -228,7 +286,7 @@ END {
             objlist = ""
             depfiles = ""
             printf "{\"\":{\"swift-dependencies\":\"%s/master.swiftdeps\"}", dir > ofm
-            ms = split(srcs[i], sa, " ")
+            ms = split(srcs[i], sa, "|")
             for (k = 1; k <= ms; k++) {
                 if (sa[k] !~ /\.swift$/) continue
                 src = rp(sa[k])
@@ -247,7 +305,7 @@ END {
             }
             # Clang options for the imported C-family modules.
             xcc = ""
-            nx = split(ctx maps " -iquote " SRCROOT " -iquote " GEN, xa, " ")
+            nx = split(ctx fwctx maps " -iquote " SRCROOT " -iquote " GEN, xa, " ")
             for (q = 1; q <= nx; q++) if (xa[q] != "") xcc = xcc " -Xcc " xa[q]
             print stamp ":" srclist " " B "/swflags.stamp" depfiles mapfiles
             print "\t@echo '  SWIFT  " mname "'"
@@ -255,7 +313,7 @@ END {
             print "\t@" SWIFTC " -c -parse-as-library -module-name " mname " -emit-module-path " B "/mods/" mname ".swiftmodule" \
                   " -output-file-map " ofm " " OPTS " -wmo -num-threads " SWIFT_THREADS \
                   " -sdk " SDK " -target arm64-apple-ios" MINIOS " -resource-dir " TCRES \
-                  " -module-cache-path " CACHE "/swift -runtime-compatibility-version none -Xfrontend -enable-cross-import-overlays -I " B "/mods" \
+                  " -module-cache-path " CACHE "/swift -runtime-compatibility-version none -Xfrontend -enable-cross-import-overlays -I " B "/mods" fwctx \
                   cleancopts(copts[i]) xcc srclist
             print "\t@touch $@"
             # The objects are produced by the module's swiftc call.
@@ -280,6 +338,6 @@ END {
     print "\t@echo '  LD     " OUT "'"
     print "\t@clang++ -target arm64-apple-ios" MINIOS " -isysroot " SDK " -fuse-ld=lld @" rsp " " RTOBJ \
           " -L" SDK "/usr/lib/swift -Wl,-rpath,/usr/lib/swift -Wl,-rpath,@executable_path/Frameworks" \
-          " -ObjC" fl " " linkflags " " LDFLAGS " -o $@"
+          " -ObjC" linkfw fl " " linkflags " " LDFLAGS " -o $@"
     if (LDID != "") print "\t@" LDID " -S" ENT " $@"
 }
