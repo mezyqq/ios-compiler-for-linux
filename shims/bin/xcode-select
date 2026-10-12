@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# xcode-select -p: the fake Xcode developer dir made by ipab (SDK + toolchain shims)
+case ${1:-} in
+-p|--print-path) echo "${IPAB_DEVELOPER_DIR:?IPAB_DEVELOPER_DIR is not set}" ;;
+-v|--version) echo "xcode-select version 2409 (ipab)" ;;
+*) exit 0 ;;
+esac

@@ -4,9 +4,9 @@
 # Env: IPAB_SDK (iOS SDK path), IPAB_MIN_IOS (default 13.0).
 SDK=${IPAB_SDK:?IPAB_SDK is not set}
 MIN=${IPAB_MIN_IOS:-13.0}
-case $(basename "$0") in
-*++|*g++|*c++) CC=clang++ ;;
-*) CC=clang ;;
+case ${IPAB_CC_NAME:-$(basename "$0")} in
+*++|*g++|*c++) CC=/usr/bin/clang++ ;;
+*) CC=/usr/bin/clang ;;
 esac
 args=()
 skip=0
@@ -19,4 +19,7 @@ for a in "$@"; do
 	esac
 	args+=("$a")
 done
-exec "$CC" -target "arm64-apple-ios$MIN" -isysroot "$SDK" -fuse-ld=lld -Wno-unused-command-line-argument "${args[@]}"
+# -fuse-ld only when linking: configure scripts compile with -Werror=unused-command-line-argument
+link=(-fuse-ld=lld)
+for a in "${args[@]}"; do case $a in -c|-S|-E|-M|-MM|-fsyntax-only) link=(); break ;; esac; done
+exec "$CC" -target "arm64-apple-ios$MIN" -isysroot "$SDK" "${link[@]}" "${args[@]}"

@@ -6,7 +6,7 @@
 #   14 textual_hdrs  15 cxxopts  16 weak_sdk_frameworks  17 linkopts  18 package
 # Paths: "pkg/file" (in SRCROOT), "@ext/<repo>/file" (EXT), "@gen/..." (GEN). Lists are space separated.
 #
-# Variables (-v): SRCROOT EXT GEN B SWIFTC TCRES SDK MINIOS CACHE OPTC OPTS SWIFT_THREADS ROOTS OUT RTOBJ LDID ENT LDFLAGS
+# Variables (-v): SRCROOT EXT GEN B SWIFTC TCRES SDK MINIOS CACHE OPTC OPTS SWIFT_THREADS ROOTS OUT RTOBJ LDID ENT LDFLAGS AR
 #
 # Output: Makefile on stdout (run with `make -C $SRCROOT`), plus module maps and output file maps under $B.
 #   - ObjC / C / C++ files compile one object per source (-MMD header deps), never depend on Swift.
@@ -20,6 +20,8 @@ BEGIN {
 }
 
 {
+    # undo the escaping of jq @tsv (\\ -> \), e.g. -DNAME=\"value\" in copts
+    for (f = 1; f <= NF; f++) gsub(/\\\\/, "\\", $f)
     n++
     label = $2
     idx[label] = n
@@ -179,9 +181,12 @@ END {
             own = incflags(i) defflags(i) ctx
             objc = kind[i] == "objc_library"
             mods = ""
-            if (objc && modules[i] == "1") mods = " -fmodules -fmodules-cache-path=" CACHE "/clang" maps
+            # Module maps of dependencies are for Swift only: C-family code includes their headers
+            # textually (building a module from every header of a C++ library fails).
+            if (objc && modules[i] == "1") mods = " -fmodules -fmodules-cache-path=" CACHE "/clang"
             co = cleancopts(copts[i])
             cxo = cleancopts(cxxopts[i])
+            libobjs = ""
             ms = split(srcs[i], sa, " ")
             for (k = 1; k <= ms; k++) {
                 s = sa[k]
@@ -198,13 +203,17 @@ END {
                 else if (s ~ /\.(S|s)$/) lang = ""
                 else { cc = "clang++"; lang = " -std=c++17" }
                 extra = (cc == "clang++") ? cxo : ""
-                print o ": " src " " B "/cflags.stamp" mapfiles
+                print o ": " src " " B "/cflags.stamp"
                 print "\t@echo '  CC     " s "'"
                 print "\t@mkdir -p $(dir $@)"
                 print "\t@" cc " " base lang mods own " " co extra " -c " src " -o $@"
                 print "-include " substr(o, 1, length(o) - 2) ".d"
                 linklist = linklist " " o
+                libobjs = libobjs " " o
             }
+            # Static archive of this library alone (what Bazel's $(location <cc_library>) gives genrules).
+            print B "/libs/" id ".a:" libobjs
+            print "\t@mkdir -p $(dir $@) && rm -f $@ && " AR " rcs $@" libobjs
             for (q = 1; q <= split(fws[i], fa, " "); q++) frameworks[fa[q]] = 1
             for (q = 1; q <= split(weakfws[i], fa, " "); q++) weakframeworks[fa[q]] = 1
             for (q = 1; q <= split(dylibs[i], fa, " "); q++) libs[fa[q]] = 1

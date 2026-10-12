@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# clang / clang++ in PATH: Apple-style invocations (-arch, -miphoneos-version-min, an iPhoneOS SDK,
+# an *-apple-ios target) go to the iOS compiler, everything else to the host compiler.
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+NAME=$(basename "$0")
+for a in "$@"; do
+	case $a in
+	-arch|-miphoneos-version-min=*|-mios-version-min=*|*iPhoneOS*.sdk*|*-apple-ios*|*-apple-darwin*)
+		IPAB_CC_NAME=$NAME exec "$HERE/ios-cc" "$@" ;;
+	esac
+done
+exec "/usr/bin/$NAME" "$@"

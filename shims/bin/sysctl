@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# sysctl: macOS hw.* queries used by build scripts; everything else goes to the real sysctl.
+n=""
+for a; do case $a in -n) n=1 ;; hw.ncpu|hw.logicalcpu|hw.physicalcpu|hw.activecpu|hw.logicalcpu_max) [ -n "$n" ] && nproc || echo "$a: $(nproc)"; exit 0 ;; hw.memsize) v=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) * 1024 )); [ -n "$n" ] && echo $v || echo "$a: $v"; exit 0 ;; esac; done
+exec /usr/bin/sysctl "$@"

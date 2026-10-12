@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Minimal xcodebuild: version / SDK queries only.
+case "$*" in
+*-version*-sdk*|*-sdk*-version*) [ "${@: -1}" = Path ] && echo "$IPAB_SDK" || basename "$IPAB_SDK" .sdk | sed 's/^iPhoneOS//' ;;
+*-version*) echo "Xcode 26.2"; echo "Build version 17C52" ;;
+*-showsdks*) echo "iOS SDKs:"; echo "	iOS $(basename "$IPAB_SDK" .sdk | sed 's/^iPhoneOS//')	-sdk iphoneos" ;;
+*) echo "xcodebuild (ipab): only -version / -showsdks are supported" >&2; exit 1 ;;
+esac

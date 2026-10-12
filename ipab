@@ -225,7 +225,7 @@ cmd_build() {
 
 	NAME="" BUNDLE_ID="" VERSION=1.0 BUILD=1 MIN_IOS=15.0 FRAMEWORKS="Foundation UIKit" LIBS=""
 	CFLAGS="" SWIFTFLAGS="" LDFLAGS="" BRIDGING_HEADER="" ICON="" ENTITLEMENTS="" DISPLAY_NAME="" RELEASES="" EXTRA_RES=""
-	MANIFEST="" ROOTS="" SRCROOT="" EXTDIR="" PREBUILD="" SWIFT_THREADS=4 GENRULES=""
+	MANIFEST="" ROOTS="" SRCROOT="" EXTDIR="" PREBUILD="" SWIFT_THREADS=4 GENRULES="" GENRULE_OVERRIDES="" GENRULE_SED="" RESOURCES=""
 	# shellcheck disable=SC1091
 	. "$PROJ/ipa.conf"
 	[ -n "$NAME" ] || die "NAME пустой в ipa.conf"
@@ -346,6 +346,9 @@ cmd_build() {
 	say "сборка $NAME ($mode, $JOBS потоков)"
 	make -s -f "$MK" -j"$JOBS" || die "компиляция не удалась"
 	fi
+	if [ -n "$MANIFEST" ] && [ -n "$RESOURCES" ]; then
+		process_resources "$(cd "$PROJ/${SRCROOT:-.}" && pwd)" "$(cd "$PROJ" && readlink -f "${EXTDIR:-external}")" "$B/gen" "$APP"
+	fi
 
 	# --- бандл (копируем только изменившееся, чтобы zip не перепаковывал лишнее)
 	cmp -s "$OBJ/$NAME" "$APP/$NAME" || cp "$OBJ/$NAME" "$APP/$NAME"
@@ -384,8 +387,8 @@ cmd_build() {
 # Rules run in dependency order from $SRC (like Bazel's execroot); a rule is skipped while its
 # command is unchanged, all outputs exist and no input is newer than its stamp.
 run_genrules() {
-	local SRC=$1 EXT=$2 GEN=$3 XPATH=$4
-	local file=$PROJ/$GENRULES dir=$GEN/.genrules
+	local SRC=$1 EXT=$2 GEN=$3 XPATH=$4 MK=$5
+	local file=$PROJ/$GENRULES dir=$GEN/.genrules LIBS=$OBJ/libs
 	[ -f "$file" ] || die "нет $file"
 	# Like Bazel, commands get paths relative to $SRC (scripts do "$(pwd)/$(RULEDIR)").
 	local RGEN=$GEN REXT=$EXT
@@ -396,7 +399,7 @@ run_genrules() {
 	local -A producer=()
 	local label in out cmd i=0 o
 	while IFS=$'\t' read -r label in out cmd; do
-		in=${in//@@SRC@@/$SRC}; in=${in//@@EXT@@/$EXT}; in=${in//@@GEN@@/$GEN}
+		in=${in//@@SRC@@/$SRC}; in=${in//@@EXT@@/$EXT}; in=${in//@@GEN@@/$GEN}; in=${in//@@LIB@@/$LIBS}
 		out=${out//@@GEN@@/$GEN}
 		labels+=("$label"); ins+=("$in"); outs+=("$out"); cmds+=("$cmd")
 		for o in $out; do producer[$o]=$i; done
@@ -426,8 +429,15 @@ run_genrules() {
 		id=$(printf '%s' "$label" | tr -c '[:alnum:]_' '_')
 		stamp=$dir/$id.stamp
 		log=$dir/$id.log
-		cmd=$(printf '%s' "${cmds[$i]}" | base64 -d)
-		cmd=${cmd//@@SRC@@\//}; cmd=${cmd//@@EXT@@/$REXT}; cmd=${cmd//@@GEN@@/$RGEN}
+		# GENRULE_OVERRIDES/<id>.sh replaces a command that cannot run on Linux (same placeholders)
+		if [ -n "$GENRULE_OVERRIDES" ] && [ -f "$PROJ/$GENRULE_OVERRIDES/$id.sh" ]; then
+			cmd=$(cat "$PROJ/$GENRULE_OVERRIDES/$id.sh")
+		else
+			cmd=$(printf '%s' "${cmds[$i]}" | base64 -d)
+		fi
+		# GENRULE_SED: sed script applied to every command (e.g. drop macOS-only tools from PATH)
+		[ -n "$GENRULE_SED" ] && cmd=$(printf '%s\n' "$cmd" | sed -f "$PROJ/$GENRULE_SED")
+		cmd=${cmd//@@SRC@@\//}; cmd=${cmd//@@EXT@@/$REXT}; cmd=${cmd//@@GEN@@/$RGEN}; cmd=${cmd//@@LIB@@/$LIBS}
 		hash=$(printf '%s' "$cmd" | md5sum | cut -d' ' -f1)
 		fresh=0
 		if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$hash" ]; then
@@ -438,6 +448,12 @@ run_genrules() {
 			fi
 		fi
 		[ $fresh = 1 ] && continue
+		# libraries the command uses ($(location <cc_library>)) are built first
+		local -a needlibs=()
+		for o in ${ins[$i]}; do case $o in "$LIBS"/*) needlibs+=("$o") ;; esac; done
+		if [ ${#needlibs[@]} -gt 0 ]; then
+			make -s -C "$SRC" -f "$MK" -j"$JOBS" "${needlibs[@]}" || die "не собрались библиотеки для $label"
+		fi
 		say "genrule $label"
 		for o in ${outs[$i]}; do mkdir -p "$(dirname "$o")"; done
 		rm -f "$stamp"
@@ -447,6 +463,154 @@ run_genrules() {
 		fi
 		for o in ${outs[$i]}; do [ -e "$o" ] || die "genrule $label не создал $o (лог: $log)"; done
 		printf '%s' "$hash" > "$stamp"
+	done
+}
+
+# Writes the MANIFEST-mode Makefile (uses build_manifest's locals: OBJ OPTC OPTS release …).
+write_manifest_makefile() {
+	local SRC=$1 EXT=$2 GEN=$3 MK=$4
+	local RT; RT=$CACHE/rt/availability-$(basename "$SDK" .sdk).o
+	local ent=""; [ -n "$ENTITLEMENTS" ] && ent=$PROJ/$ENTITLEMENTS
+	{
+		awk -v SRCROOT="$SRC" -v EXT="$EXT" -v GEN="$GEN" -v B="$OBJ" -v SWIFTC="$SWIFTC" -v TCRES="$TC/darwin-res" \
+			-v SDK="$SDK" -v MINIOS="$MIN_IOS" -v CACHE="$CACHE" -v OPTC="$OPTC $CFLAGS" -v OPTS="$OPTS $SWIFTFLAGS" \
+			-v SWIFT_THREADS="$SWIFT_THREADS" -v ROOTS="$ROOTS" -v OUT="$OBJ/$NAME" -v RTOBJ="$RT" \
+			-v LDID="$([ -x "$LDID" ] && echo "$LDID")" -v ENT="$ent" -v LDFLAGS="$LDFLAGS" -v AR="$TC/llvm-native/bin/llvm-ar" \
+			-f "$IPAB_HOME/manifest.awk" "$PROJ/$MANIFEST" || die "не удалось разобрать манифест"
+		echo "$RT: $IPAB_HOME/runtime/availability.c"
+		printf '\t@mkdir -p %s\n' "$CACHE/rt"
+		printf '\t@clang -target arm64-apple-ios12.0 -isysroot %s -O2 -c $< -o $@\n' "$SDK"
+	} > "$MK.tmp"
+	cmp -s "$MK.tmp" "$MK" && rm "$MK.tmp" || mv "$MK.tmp" "$MK"
+}
+
+# ---------------------------------------------------------------- resources (MANIFEST mode)
+# RESOURCES=resources.tsv:  "bundle <name> <Info.plist fragment base64>" / "file <bundle or empty> <path>".
+# - asset catalogs (.xcassets) can't be compiled without actool: every imageset is rasterized
+#   (PDF via pdftocairo, SVG via rsvg-convert, PNG/JPG copied) to <bundle>/ModAssets/<name>@2x/@3x.png,
+#   template images listed in ModAssets/templates.txt — the app loads them when Assets.car is absent;
+# - .metal sources of a bundle are joined into <bundle>/default.metal (compiled on the device);
+# - files under *.lproj keep that folder, everything else goes to the bundle root.
+resource_job() {  # kind src dst scale — one rasterization, skipped when dst is newer than src
+	local kind=$1 src=$2 dst=$3 scale=$4
+	[ -f "$dst" ] && [ "$dst" -nt "$src" ] && return 0
+	mkdir -p "$(dirname "$dst")"
+	case $kind in
+	pdf) pdftocairo -png -singlefile -transp -r $((72 * scale)) "$src" "${dst%.png}" ;;
+	svg) rsvg-convert -z "$scale" -o "$dst" "$src" ;;
+	*) cp -f "$src" "$dst" ;;
+	esac
+}
+export -f resource_job
+
+process_resources() {
+	local SRC=$1 EXT=$2 GEN=$3 APP=$4
+	local file=$PROJ/$RESOURCES
+	[ -f "$file" ] || die "нет $file"
+	say "ресурсы ($RESOURCES)"
+	local jobs=$B/resource-jobs.txt kind bundle path dir dst rel
+	: > "$jobs"
+	local -A imagesets=() metal=()
+	while IFS=$'\t' read -r kind bundle path; do
+		dir=$APP; [ -n "$bundle" ] && dir=$APP/$bundle.bundle
+		mkdir -p "$dir"
+		if [ "$kind" = bundle ]; then
+			{
+				echo '<?xml version="1.0" encoding="UTF-8"?>'
+				echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+				echo '<plist version="1.0"><dict>'
+				printf '%s' "$path" | base64 -d
+				echo '<key>CFBundlePackageType</key><string>BNDL</string>'
+				echo '</dict></plist>'
+			} > "$dir/Info.plist.tmp"
+			cmp -s "$dir/Info.plist.tmp" "$dir/Info.plist" && rm "$dir/Info.plist.tmp" || mv "$dir/Info.plist.tmp" "$dir/Info.plist"
+			continue
+		fi
+		path=${path//@@SRC@@/$SRC}; path=${path//@@EXT@@/$EXT}; path=${path//@@GEN@@/$GEN}
+		case $path in
+		*.xcassets/*.imageset/*) imagesets["$dir|${path%/*}"]=1; continue ;;
+		*.xcassets/*) continue ;;
+		*.metal) metal[$dir]+="$path"$'\n'; continue ;;
+		*.storyboard|*.xib|*.intentdefinition) continue ;;
+		esac
+		[ -f "$path" ] || continue
+		case $path in
+		*.lproj/*) rel=${path%/*}; dst=$dir/${rel##*/}/${path##*/} ;;
+		*) dst=$dir/${path##*/} ;;
+		esac
+		if [ ! -f "$dst" ] || [ "$path" -nt "$dst" ]; then mkdir -p "$(dirname "$dst")"; cp -f "$path" "$dst"; fi
+	done < "$file"
+
+	# imagesets -> rasterization jobs
+	local key set catalog name part sub ns templates
+	local -A tmpl=()
+	for key in "${!imagesets[@]}"; do
+		dir=${key%%|*}; set=${key#*|}
+		catalog=${set%%.xcassets/*}.xcassets
+		rel=${set#"$catalog"/}
+		name=""; sub=$catalog
+		local -a parts=()
+		IFS=/ read -ra parts <<< "$rel"
+		for part in "${parts[@]}"; do
+			sub=$sub/$part
+			case $part in
+			*.imageset) name+=${part%.imageset} ;;
+			*) ns=$(jq -r '.properties."provides-namespace" // false' "$sub/Contents.json" 2>/dev/null || echo false)
+			   [ "$ns" = true ] && name+=$part/ ;;
+			esac
+		done
+		[ -f "$set/Contents.json" ] || continue
+		if [ "$(jq -r '.properties."template-rendering-intent" // ""' "$set/Contents.json")" = template ]; then
+			tmpl[$dir]+="$name"$'\n'
+		fi
+		local fname scale ext
+		while IFS=$'\t' read -r fname scale; do
+			[ -n "$fname" ] && [ -f "$set/$fname" ] || continue
+			ext=${fname##*.}; ext=${ext,,}
+			case $ext in
+			pdf|svg)
+				if [ -z "$scale" ]; then
+					printf '%s\t%s\t%s\t%s\n' "$ext" "$set/$fname" "$dir/ModAssets/$name@2x.png" 2 >> "$jobs"
+					printf '%s\t%s\t%s\t%s\n' "$ext" "$set/$fname" "$dir/ModAssets/$name@3x.png" 3 >> "$jobs"
+				else
+					printf '%s\t%s\t%s\t%s\n' "$ext" "$set/$fname" "$dir/ModAssets/$name@${scale}.png" "${scale%x}" >> "$jobs"
+				fi ;;
+			png|jpg|jpeg)
+				local sfx=""; [ -n "$scale" ] && [ "$scale" != 1x ] && sfx=@$scale
+				printf '%s\t%s\t%s\t%s\n' copy "$set/$fname" "$dir/ModAssets/$name$sfx.png" 1 >> "$jobs" ;;
+			esac
+		done < <(jq -r '.images[]? | select(.filename) | [.filename, (.scale // "")] | @tsv' "$set/Contents.json")
+	done
+	for dir in "${!tmpl[@]}"; do
+		mkdir -p "$dir/ModAssets"
+		printf '%s' "${tmpl[$dir]}" | sort > "$dir/ModAssets/templates.txt.tmp"
+		cmp -s "$dir/ModAssets/templates.txt.tmp" "$dir/ModAssets/templates.txt" && rm "$dir/ModAssets/templates.txt.tmp" || mv "$dir/ModAssets/templates.txt.tmp" "$dir/ModAssets/templates.txt"
+	done
+	say "картинки: $(wc -l < "$jobs") файлов из ${#imagesets[@]} наборов"
+	tr '\t' '\0' < "$jobs" | xargs -0 -n4 -P"$JOBS" bash -c 'resource_job "$@"' _ || die "не удалось подготовить картинки"
+
+	# shaders: one source per bundle, local #include "…" inlined
+	local m
+	for dir in "${!metal[@]}"; do
+		{
+			while IFS= read -r m; do
+				[ -n "$m" ] || continue
+				echo "// ---- ${m##*/}"
+				awk -v base="${m%/*}" '
+					function emit(f,   line, inc) {
+						while ((getline line < f) > 0) {
+							if (match(line, /^[ \t]*#[ \t]*include[ \t]*"[^"]+"/)) {
+								inc = line; sub(/^[^"]*"/, "", inc); sub(/".*$/, "", inc)
+								if (!((base "/" inc) in seen)) { seen[base "/" inc] = 1; emit(base "/" inc) }
+							} else if (line ~ /^[ \t]*#[ \t]*pragma[ \t]+once/) {
+							} else print line
+						}
+						close(f)
+					}
+					BEGIN { emit(ARGV[1]); exit }' "$m"
+			done <<< "${metal[$dir]}"
+		} > "$dir/default.metal.tmp"
+		cmp -s "$dir/default.metal.tmp" "$dir/default.metal" && rm "$dir/default.metal.tmp" || mv "$dir/default.metal.tmp" "$dir/default.metal"
 	done
 }
 
@@ -471,12 +635,20 @@ build_manifest() {
 
 	# Apple tools (xcrun, libtool, lipo, arm-apple-darwin-*) for third-party build scripts
 	local XPATH="$IPAB_HOME/shims/bin:$PATH"
-	[ -n "$GENRULES" ] && run_genrules "$SRC" "$EXT" "$GEN" "$XPATH"
-	if [ -n "$PREBUILD" ]; then
-		say "подготовка ($PREBUILD)"
-		PATH=$XPATH IPAB_SDK=$SDK IPAB_MIN_IOS=$MIN_IOS GEN=$GEN SRCROOT=$SRC SDK=$SDK MIN_IOS=$MIN_IOS JOBS=$JOBS CACHE=$CACHE IPAB_HOME=$IPAB_HOME \
-			bash "$PROJ/$PREBUILD" || die "PREBUILD не удался"
+	# Fake Xcode developer dir: scripts look for …/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS*.sdk
+	# and …/Toolchains/XcodeDefault.xctoolchain/usr/bin/<tool>.
+	local DEV=$CACHE/xcode/$(basename "$SDK" .sdk)/Xcode.app/Contents/Developer x
+	if [ ! -d "$DEV" ]; then
+		mkdir -p "$DEV/Platforms/iPhoneOS.platform/Developer/SDKs" "$DEV/Toolchains/XcodeDefault.xctoolchain/usr/bin" "$DEV/usr/bin"
+		ln -sfn "$SDK" "$DEV/Platforms/iPhoneOS.platform/Developer/SDKs/$(basename "$SDK")"
+		ln -sfn "$SDK" "$DEV/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
+		for x in "$IPAB_HOME"/shims/xcrun-tools/*; do
+			ln -sfn "$x" "$DEV/Toolchains/XcodeDefault.xctoolchain/usr/bin/$(basename "$x")"
+		done
+		for x in clang clang++; do ln -sfn "$IPAB_HOME/shims/xcrun-tools/ios-cc" "$DEV/Toolchains/XcodeDefault.xctoolchain/usr/bin/$x"; done
+		ln -sfn "$IPAB_HOME/shims/bin/xcrun" "$DEV/usr/bin/xcrun"
 	fi
+	export IPAB_DEVELOPER_DIR=$DEV
 
 	local OPTC="-O0 -g0" OPTS="-Onone"
 	[ $release = 1 ] && { OPTC="-Os -g0"; OPTS="-O"; }
@@ -485,20 +657,15 @@ build_manifest() {
 	mstamp swflags.stamp "$SDK $MIN_IOS $OPTS $SWIFT_THREADS $SWIFTFLAGS"
 	mstamp ldflags.stamp "$SDK $MIN_IOS $LDFLAGS $ENTITLEMENTS"
 
-	local RT; RT=$CACHE/rt/availability-$(basename "$SDK" .sdk).o
-	local ent=""; [ -n "$ENTITLEMENTS" ] && ent=$PROJ/$ENTITLEMENTS
 	local MK=$B/Makefile.$mode
-	{
-		awk -v SRCROOT="$SRC" -v EXT="$EXT" -v GEN="$GEN" -v B="$OBJ" -v SWIFTC="$SWIFTC" -v TCRES="$TC/darwin-res" \
-			-v SDK="$SDK" -v MINIOS="$MIN_IOS" -v CACHE="$CACHE" -v OPTC="$OPTC $CFLAGS" -v OPTS="$OPTS $SWIFTFLAGS" \
-			-v SWIFT_THREADS="$SWIFT_THREADS" -v ROOTS="$ROOTS" -v OUT="$OBJ/$NAME" -v RTOBJ="$RT" \
-			-v LDID="$([ -x "$LDID" ] && echo "$LDID")" -v ENT="$ent" -v LDFLAGS="$LDFLAGS" \
-			-f "$IPAB_HOME/manifest.awk" "$PROJ/$MANIFEST" || die "не удалось разобрать манифест"
-		echo "$RT: $IPAB_HOME/runtime/availability.c"
-		printf '\t@mkdir -p %s\n' "$CACHE/rt"
-		printf '\t@clang -target arm64-apple-ios12.0 -isysroot %s -O2 -c $< -o $@\n' "$SDK"
-	} > "$MK.tmp"
-	cmp -s "$MK.tmp" "$MK" && rm "$MK.tmp" || mv "$MK.tmp" "$MK"
+	write_manifest_makefile "$SRC" "$EXT" "$GEN" "$MK"
+	[ -n "$GENRULES" ] && run_genrules "$SRC" "$EXT" "$GEN" "$XPATH" "$MK"
+	if [ -n "$PREBUILD" ]; then
+		say "подготовка ($PREBUILD)"
+		PATH=$XPATH IPAB_SDK=$SDK IPAB_MIN_IOS=$MIN_IOS GEN=$GEN SRCROOT=$SRC SDK=$SDK MIN_IOS=$MIN_IOS JOBS=$JOBS CACHE=$CACHE IPAB_HOME=$IPAB_HOME \
+			bash "$PROJ/$PREBUILD" || die "PREBUILD не удался"
+	fi
+
 
 	say "сборка $NAME ($mode, $JOBS потоков, $(grep -c '' "$PROJ/$MANIFEST") библиотек в манифесте)"
 	make -s -C "$SRC" -f "$MK" -j"$JOBS" ${IPAB_KEEP_GOING:+-k} || die "компиляция не удалась"
