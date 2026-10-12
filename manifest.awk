@@ -147,6 +147,14 @@ function swiftmode(nsrc) {
     return " -enable-batch-mode -j" SWIFT_BATCH_JOBS
 }
 
+# framework name with the letter case used in the SDK (BUILD files may say "UIKIt": macOS ignores case)
+function sdkframework(f,    cmd, line) {
+    cmd = "ls '" SDK "/System/Library/Frameworks' 2>/dev/null"
+    while ((cmd | getline line) > 0) if (tolower(line) == tolower(f) ".framework") { f = substr(line, 1, length(line) - 10); break }
+    close(cmd)
+    return f
+}
+
 function isswift(i) { return kind[i] == "swift_library" }
 function iscfam(i) { return kind[i] == "objc_library" || kind[i] == "cc_library" }
 
@@ -360,9 +368,10 @@ END {
     for (k = 1; k <= na; k++) print aa[k] > rsp
     close(rsp)
     fl = ""
-    for (f in frameworks) fl = fl " -framework " f
-    for (f in weakframeworks) fl = fl " -weak_framework " f
-    for (f in libs) fl = fl " -l" f
+    for (f in frameworks) fl = fl " -framework " sdkframework(f)
+    for (f in weakframeworks) fl = fl " -weak_framework " sdkframework(f)
+    # sdk_dylibs may be written "libz" (Bazel drops the prefix)
+    for (f in libs) { x = f; sub(/^lib/, "", x); sub(/\.(tbd|dylib)$/, "", x); fl = fl " -l" x }
     print "OBJECTS :=" linklist archives
     nf = split(forceload, fa2, " ")
     for (k = 1; k <= nf; k++) { x = fa2[k]; sub(/^-Wl,-force_load,/, "", x); print "OBJECTS += " x }
