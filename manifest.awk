@@ -3,7 +3,7 @@
 # Input: a TSV manifest, one library per line:
 #   1 kind (swift_library|objc_library|cc_library)  2 label  3 module_name  4 srcs  5 hdrs  6 deps
 #   7 copts  8 includes  9 defines  10 sdk_frameworks  11 sdk_dylibs  12 enable_modules  13 data
-#   14 textual_hdrs  15 cxxopts  16 weak_sdk_frameworks  17 linkopts  18 package
+#   14 textual_hdrs  15 cxxopts  16 weak_sdk_frameworks  17 linkopts  18 package  19 alwayslink
 # Paths: "pkg/file" (in SRCROOT), "@ext/<repo>/file" (EXT), "@gen/..." (GEN). File lists (srcs hdrs
 # data textual_hdrs) are separated by "|", other lists by spaces.
 #
@@ -43,6 +43,7 @@ BEGIN {
     weakfws[n] = $16
     linkopts[n] = $17
     pkg[n] = $18
+    alwayslink[n] = $19
 }
 
 function rp(p,    r, s, d) {
@@ -276,12 +277,25 @@ END {
                 # clang modules only for ObjC: in ObjC++ (with C++20+) they hide parts of Foundation
                 print "\t@" cc " " base lang (s ~ /\.m$/ ? mods : "") own " " co extra " -c " src " -o $@"
                 print "-include " substr(o, 1, length(o) - 2) ".d"
-                linklist = linklist " " o
                 libobjs = libobjs " " o
             }
             # Static archive of this library alone (what Bazel's $(location <cc_library>) gives genrules).
-            print B "/libs/" id ".a:" libobjs
-            print "\t@mkdir -p $(dir $@) && rm -f $@ && " AR " rcs $@" libobjs
+            # Linked like Bazel does: as an archive (only referenced members are loaded, -ObjC loads
+            # ObjC classes/categories), alwayslink libraries entirely.
+            if (libobjs != "") {
+                # object list in a response file: WebRTC has thousands of objects (argument list too long)
+                lst = B "/libs/" id ".objs"
+                system("mkdir -p '" B "/libs'")
+                nobj = split(libobjs, oa, " ")
+                printf "" > (lst ".tmp")
+                for (q = 1; q <= nobj; q++) print oa[q] > (lst ".tmp")
+                close(lst ".tmp")
+                system("cmp -s '" lst ".tmp' '" lst "' && rm -f '" lst ".tmp' || mv -f '" lst ".tmp' '" lst "'")
+                print B "/libs/" id ".a:" libobjs " " lst
+                print "\t@rm -f $@ && " AR " rcs $@ @" lst
+                if (alwayslink[i] == "1") forceload = forceload " -Wl,-force_load," B "/libs/" id ".a"
+                else archives = archives " " B "/libs/" id ".a"
+            }
             for (q = 1; q <= split(fws[i], fa, " "); q++) frameworks[fa[q]] = 1
             for (q = 1; q <= split(weakfws[i], fa, " "); q++) weakframeworks[fa[q]] = 1
             for (q = 1; q <= split(dylibs[i], fa, " "); q++) libs[fa[q]] = 1
@@ -342,16 +356,20 @@ END {
     nl = split(linklist, la, " ")
     printf "" > rsp
     for (k = 1; k <= nl; k++) print la[k] > rsp
+    na = split(archives, aa, " ")
+    for (k = 1; k <= na; k++) print aa[k] > rsp
     close(rsp)
     fl = ""
     for (f in frameworks) fl = fl " -framework " f
     for (f in weakframeworks) fl = fl " -weak_framework " f
     for (f in libs) fl = fl " -l" f
-    print "OBJECTS :=" linklist
+    print "OBJECTS :=" linklist archives
+    nf = split(forceload, fa2, " ")
+    for (k = 1; k <= nf; k++) { x = fa2[k]; sub(/^-Wl,-force_load,/, "", x); print "OBJECTS += " x }
     print OUT ": $(OBJECTS)" swiftstamps " " RTOBJ " " B "/ldflags.stamp"
     print "\t@echo '  LD     " OUT "'"
     print "\t@clang++ -target arm64-apple-ios" MINIOS " -isysroot " SDK " -fuse-ld=lld @" rsp " " RTOBJ \
           " -L" SDK "/usr/lib/swift -Wl,-rpath,/usr/lib/swift -Wl,-rpath,@executable_path/Frameworks" \
-          " -ObjC" linkfw fl " " linkflags " " LDFLAGS " -o $@"
+          " -ObjC" forceload linkfw fl " " linkflags " " LDFLAGS " -o $@"
     if (LDID != "") print "\t@" LDID " -S" ENT " $@"
 }
