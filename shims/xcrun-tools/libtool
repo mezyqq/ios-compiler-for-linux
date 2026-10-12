@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Apple libtool: only `libtool -static -o out.a inputs…` (static archives, also merging .a files).
+LLVM=$(cd "$(dirname "$(readlink -f "$0")")/../../toolchains/llvm-native/bin" && pwd)
+exec "$LLVM/llvm-libtool-darwin" "$@"

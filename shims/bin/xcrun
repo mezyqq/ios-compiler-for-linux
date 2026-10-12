@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# xcrun replacement: SDK queries and Apple tools mapped to the Linux iOS toolchain (iphoneos only).
+HERE=$(cd "$(dirname "$(readlink -f "$0")")/../xcrun-tools" && pwd)
+SDK=${IPAB_SDK:?IPAB_SDK is not set}
+sdk=iphoneos
+while [ $# -gt 0 ]; do
+	case $1 in
+	-sdk|--sdk) sdk=$2; shift 2 ;;
+	--sdk=*) sdk=${1#*=}; shift ;;
+	--toolchain) shift 2 ;;
+	--show-sdk-path) echo "$SDK"; exit 0 ;;
+	--show-sdk-version) basename "$SDK" .sdk | sed 's/^iPhoneOS//'; exit 0 ;;
+	--show-sdk-platform-path) dirname "$(dirname "$SDK")"; exit 0 ;;
+	--show-sdk-build-version) echo "0"; exit 0 ;;
+	-f|--find) [ -e "$HERE/$2" ] && echo "$HERE/$2" || command -v "$2"; exit 0 ;;
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+case $sdk in
+iphoneos*|"") ;;
+*) echo "xcrun (ipab): only the iphoneos SDK is available, asked for '$sdk'" >&2; exit 1 ;;
+esac
+[ $# -gt 0 ] || exit 0
+tool=$1; shift
+if [ -e "$HERE/$tool" ]; then exec "$HERE/$tool" "$@"; fi
+exec "$tool" "$@"

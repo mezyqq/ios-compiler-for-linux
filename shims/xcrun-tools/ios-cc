@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# clang for iOS arm64 that understands Apple-style options (-arch, -miphoneos-version-min, -isysroot).
+# Installed as clang / clang++ / arm-apple-darwin-gcc / … ; the name decides C or C++.
+# Env: IPAB_SDK (iOS SDK path), IPAB_MIN_IOS (default 13.0).
+SDK=${IPAB_SDK:?IPAB_SDK is not set}
+MIN=${IPAB_MIN_IOS:-13.0}
+case $(basename "$0") in
+*++|*g++|*c++) CC=clang++ ;;
+*) CC=clang ;;
+esac
+args=()
+skip=0
+for a in "$@"; do
+	if [ $skip = 1 ]; then skip=0; continue; fi
+	case $a in
+	-arch|-target|--target|-isysroot) skip=1; continue ;;
+	--target=*|-target=*|-mios-version-min=*|-miphoneos-version-min=*|-mtargetos=*|--sysroot=*) continue ;;
+	-fembed-bitcode*|-mno-thumb) continue ;;
+	esac
+	args+=("$a")
+done
+exec "$CC" -target "arm64-apple-ios$MIN" -isysroot "$SDK" -fuse-ld=lld -Wno-unused-command-line-argument "${args[@]}"

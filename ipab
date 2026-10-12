@@ -225,6 +225,7 @@ cmd_build() {
 
 	NAME="" BUNDLE_ID="" VERSION=1.0 BUILD=1 MIN_IOS=15.0 FRAMEWORKS="Foundation UIKit" LIBS=""
 	CFLAGS="" SWIFTFLAGS="" LDFLAGS="" BRIDGING_HEADER="" ICON="" ENTITLEMENTS="" DISPLAY_NAME="" RELEASES="" EXTRA_RES=""
+	MANIFEST="" ROOTS="" SRCROOT="" EXTDIR="" PREBUILD="" SWIFT_THREADS=4 GENRULES=""
 	# shellcheck disable=SC1091
 	. "$PROJ/ipa.conf"
 	[ -n "$NAME" ] || die "NAME пустой в ipa.conf"
@@ -242,6 +243,9 @@ cmd_build() {
 	local MOD; MOD=$(printf '%s' "$NAME" | tr -c '[:alnum:]_\n' '_'); [[ $MOD =~ ^[0-9] ]] && MOD=_$MOD
 	mkdir -p "$OBJ" "$APP" "$CACHE"
 
+	if [ -n "$MANIFEST" ]; then
+	build_manifest
+	else
 	# --- исходники
 	local -a cfam=() swift=()
 	local f
@@ -341,6 +345,7 @@ cmd_build() {
 
 	say "сборка $NAME ($mode, $JOBS потоков)"
 	make -s -f "$MK" -j"$JOBS" || die "компиляция не удалась"
+	fi
 
 	# --- бандл (копируем только изменившееся, чтобы zip не перепаковывал лишнее)
 	cmp -s "$OBJ/$NAME" "$APP/$NAME" || cp "$OBJ/$NAME" "$APP/$NAME"
@@ -372,6 +377,131 @@ cmd_build() {
 		[ -f "$B/$NAME.map" ] && cp "$B/$NAME.map" "$REL/$NAME-$VERSION.map"
 		say "релиз $VERSION (сборка $BUILD): $REL/$NAME-$VERSION.ipa"
 	fi
+}
+
+# ---------------------------------------------------------------- genrules
+# GENRULES=genrules.tsv: label, inputs, outputs, base64 bash command (placeholders @@SRC@@ @@EXT@@ @@GEN@@).
+# Rules run in dependency order from $SRC (like Bazel's execroot); a rule is skipped while its
+# command is unchanged, all outputs exist and no input is newer than its stamp.
+run_genrules() {
+	local SRC=$1 EXT=$2 GEN=$3 XPATH=$4
+	local file=$PROJ/$GENRULES dir=$GEN/.genrules
+	[ -f "$file" ] || die "нет $file"
+	# Like Bazel, commands get paths relative to $SRC (scripts do "$(pwd)/$(RULEDIR)").
+	local RGEN=$GEN REXT=$EXT
+	case $GEN in "$SRC"/*) RGEN=${GEN#"$SRC"/} ;; esac
+	case $EXT in "$SRC"/*) REXT=${EXT#"$SRC"/} ;; esac
+	mkdir -p "$dir"
+	local -a labels=() ins=() outs=() cmds=()
+	local -A producer=()
+	local label in out cmd i=0 o
+	while IFS=$'\t' read -r label in out cmd; do
+		in=${in//@@SRC@@/$SRC}; in=${in//@@EXT@@/$EXT}; in=${in//@@GEN@@/$GEN}
+		out=${out//@@GEN@@/$GEN}
+		labels+=("$label"); ins+=("$in"); outs+=("$out"); cmds+=("$cmd")
+		for o in $out; do producer[$o]=$i; done
+		i=$((i + 1))
+	done < "$file"
+	local n=$i
+	# topological order
+	local -A done_=()
+	local -a order=()
+	local progress=1 j ok
+	while [ ${#order[@]} -lt $n ] && [ $progress = 1 ]; do
+		progress=0
+		for ((i = 0; i < n; i++)); do
+			[ -n "${done_[$i]:-}" ] && continue
+			ok=1
+			for o in ${ins[$i]}; do
+				j=${producer[$o]:-}
+				if [ -n "$j" ] && [ "$j" != "$i" ] && [ -z "${done_[$j]:-}" ]; then ok=0; break; fi
+			done
+			[ $ok = 1 ] && { order+=("$i"); done_[$i]=1; progress=1; }
+		done
+	done
+	[ ${#order[@]} = $n ] || die "циклическая зависимость в $GENRULES"
+	local id stamp hash log fresh
+	for i in "${order[@]}"; do
+		label=${labels[$i]}
+		id=$(printf '%s' "$label" | tr -c '[:alnum:]_' '_')
+		stamp=$dir/$id.stamp
+		log=$dir/$id.log
+		cmd=$(printf '%s' "${cmds[$i]}" | base64 -d)
+		cmd=${cmd//@@SRC@@\//}; cmd=${cmd//@@EXT@@/$REXT}; cmd=${cmd//@@GEN@@/$RGEN}
+		hash=$(printf '%s' "$cmd" | md5sum | cut -d' ' -f1)
+		fresh=0
+		if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$hash" ]; then
+			fresh=1
+			for o in ${outs[$i]}; do [ -e "$o" ] || { fresh=0; break; }; done
+			if [ $fresh = 1 ]; then
+				for o in ${ins[$i]}; do [ "$o" -nt "$stamp" ] && { fresh=0; break; }; done
+			fi
+		fi
+		[ $fresh = 1 ] && continue
+		say "genrule $label"
+		for o in ${outs[$i]}; do mkdir -p "$(dirname "$o")"; done
+		rm -f "$stamp"
+		if ! (cd "$SRC" && PATH=$XPATH IPAB_SDK=$SDK IPAB_MIN_IOS=$MIN_IOS bash -c "$cmd") > "$log" 2>&1; then
+			tail -n 40 "$log" >&2
+			die "genrule $label не удался (лог: $log)"
+		fi
+		for o in ${outs[$i]}; do [ -e "$o" ] || die "genrule $label не создал $o (лог: $log)"; done
+		printf '%s' "$hash" > "$stamp"
+	done
+}
+
+# ---------------------------------------------------------------- MANIFEST mode
+# Big multi-module projects (e.g. a Telegram fork): libraries are described by a TSV manifest
+# (format in manifest.awk) instead of src/. Called from cmd_build with its locals (B OBJ mode release).
+#   MANIFEST=manifest.tsv            path relative to the project
+#   ROOTS="//app:Main //app:Lib"     labels to link into the app; everything they depend on is built
+#   SRCROOT=..                       where manifest paths start (default: the project dir)
+#   EXTDIR=external                  @ext/<repo>/… files (default: <project>/external)
+#   PREBUILD=prebuild.sh             run before make with GEN SRCROOT SDK MIN_IOS JOBS CACHE in env;
+#                                    produces @gen/… files (generated sources, third-party static libs)
+#   SWIFT_THREADS=4                  swiftc -num-threads per module
+build_manifest() {
+	local SRC; SRC=$(cd "$PROJ/${SRCROOT:-.}" && pwd)
+	local EXT; EXT=$(cd "$PROJ" && readlink -f "${EXTDIR:-external}")
+	local GEN=$B/gen
+	[ -f "$PROJ/$MANIFEST" ] || die "нет манифеста $PROJ/$MANIFEST"
+	[ -n "$ROOTS" ] || die "ROOTS пустой в ipa.conf"
+	[ -x "$SWIFTC" ] || die "нет тулчейна Swift в $TC/swift"
+	mkdir -p "$GEN" "$OBJ"
+
+	# Apple tools (xcrun, libtool, lipo, arm-apple-darwin-*) for third-party build scripts
+	local XPATH="$IPAB_HOME/shims/bin:$PATH"
+	[ -n "$GENRULES" ] && run_genrules "$SRC" "$EXT" "$GEN" "$XPATH"
+	if [ -n "$PREBUILD" ]; then
+		say "подготовка ($PREBUILD)"
+		PATH=$XPATH IPAB_SDK=$SDK IPAB_MIN_IOS=$MIN_IOS GEN=$GEN SRCROOT=$SRC SDK=$SDK MIN_IOS=$MIN_IOS JOBS=$JOBS CACHE=$CACHE IPAB_HOME=$IPAB_HOME \
+			bash "$PROJ/$PREBUILD" || die "PREBUILD не удался"
+	fi
+
+	local OPTC="-O0 -g0" OPTS="-Onone"
+	[ $release = 1 ] && { OPTC="-Os -g0"; OPTS="-O"; }
+	mstamp() { printf '%s\n' "$2" > "$OBJ/$1.tmp"; cmp -s "$OBJ/$1.tmp" "$OBJ/$1" && rm "$OBJ/$1.tmp" || mv "$OBJ/$1.tmp" "$OBJ/$1"; }
+	mstamp cflags.stamp "$SDK $MIN_IOS $OPTC $CFLAGS"
+	mstamp swflags.stamp "$SDK $MIN_IOS $OPTS $SWIFT_THREADS $SWIFTFLAGS"
+	mstamp ldflags.stamp "$SDK $MIN_IOS $LDFLAGS $ENTITLEMENTS"
+
+	local RT; RT=$CACHE/rt/availability-$(basename "$SDK" .sdk).o
+	local ent=""; [ -n "$ENTITLEMENTS" ] && ent=$PROJ/$ENTITLEMENTS
+	local MK=$B/Makefile.$mode
+	{
+		awk -v SRCROOT="$SRC" -v EXT="$EXT" -v GEN="$GEN" -v B="$OBJ" -v SWIFTC="$SWIFTC" -v TCRES="$TC/darwin-res" \
+			-v SDK="$SDK" -v MINIOS="$MIN_IOS" -v CACHE="$CACHE" -v OPTC="$OPTC $CFLAGS" -v OPTS="$OPTS $SWIFTFLAGS" \
+			-v SWIFT_THREADS="$SWIFT_THREADS" -v ROOTS="$ROOTS" -v OUT="$OBJ/$NAME" -v RTOBJ="$RT" \
+			-v LDID="$([ -x "$LDID" ] && echo "$LDID")" -v ENT="$ent" -v LDFLAGS="$LDFLAGS" \
+			-f "$IPAB_HOME/manifest.awk" "$PROJ/$MANIFEST" || die "не удалось разобрать манифест"
+		echo "$RT: $IPAB_HOME/runtime/availability.c"
+		printf '\t@mkdir -p %s\n' "$CACHE/rt"
+		printf '\t@clang -target arm64-apple-ios12.0 -isysroot %s -O2 -c $< -o $@\n' "$SDK"
+	} > "$MK.tmp"
+	cmp -s "$MK.tmp" "$MK" && rm "$MK.tmp" || mv "$MK.tmp" "$MK"
+
+	say "сборка $NAME ($mode, $JOBS потоков, $(grep -c '' "$PROJ/$MANIFEST") библиотек в манифесте)"
+	make -s -C "$SRC" -f "$MK" -j"$JOBS" ${IPAB_KEEP_GOING:+-k} || die "компиляция не удалась"
 }
 
 cmd_clean() { local p=${1:-.}; rm -rf "$p/build"; say "очищено $p/build"; }

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# lipo for single-architecture (arm64) files: -create/-thin copy the input, -info/-archs report arm64.
+out=""; inputs=(); mode=""
+while [ $# -gt 0 ]; do
+	case $1 in
+	-create) mode=create; shift ;;
+	-thin|-extract|-remove) mode=create; shift 2 ;;
+	-output|-o) out=$2; shift 2 ;;
+	-info) mode=info; shift ;;
+	-archs|-verify_arch) mode=archs; shift; [ "$mode" = archs ] && break ;;
+	-arch) shift 2 ;;
+	-*) shift ;;
+	*) inputs+=("$1"); shift ;;
+	esac
+done
+case $mode in
+info) echo "Non-fat file: ${inputs[0]} is architecture: arm64" ;;
+archs) echo "arm64" ;;
+*) [ -n "$out" ] && [ ${#inputs[@]} -gt 0 ] && cp -f "${inputs[0]}" "$out" ;;
+esac
