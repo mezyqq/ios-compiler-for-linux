@@ -511,7 +511,11 @@ process_resources() {
 	local jobs=$B/resource-jobs.txt kind bundle path dir dst rel
 	: > "$jobs"
 	local -A imagesets=() metal=()
-	while IFS=$'\t' read -r kind bundle path; do
+	local line
+	# fields are split by hand: with IFS=tab, `read` merges the two tabs around an empty bundle name
+	while IFS= read -r line; do
+		kind=${line%%$'\t'*}; line=${line#*$'\t'}
+		bundle=${line%%$'\t'*}; path=${line#*$'\t'}
 		dir=$APP; [ -n "$bundle" ] && dir=$APP/$bundle.bundle
 		mkdir -p "$dir"
 		if [ "$kind" = bundle ]; then
@@ -587,7 +591,7 @@ process_resources() {
 		cmp -s "$dir/ModAssets/templates.txt.tmp" "$dir/ModAssets/templates.txt" && rm "$dir/ModAssets/templates.txt.tmp" || mv "$dir/ModAssets/templates.txt.tmp" "$dir/ModAssets/templates.txt"
 	done
 	say "картинки: $(wc -l < "$jobs") файлов из ${#imagesets[@]} наборов"
-	tr '\t' '\0' < "$jobs" | xargs -0 -n4 -P"$JOBS" bash -c 'resource_job "$@"' _ || die "не удалось подготовить картинки"
+	tr '\t\n' '\0\0' < "$jobs" | xargs -0 -n4 -P"$JOBS" bash -c 'resource_job "$@"' _ || die "не удалось подготовить картинки"
 
 	# shaders: one source per bundle, local #include "…" inlined
 	local m
