@@ -377,8 +377,9 @@ END {
     for (k = 1; k <= nf; k++) { x = fa2[k]; sub(/^-Wl,-force_load,/, "", x); print "OBJECTS += " x }
     print OUT ": $(OBJECTS)" swiftstamps " " RTOBJ " " B "/ldflags.stamp"
     print "\t@echo '  LD     " OUT "'"
-    print "\t@clang++ -target arm64-apple-ios" MINIOS " -isysroot " SDK " -fuse-ld=lld @" rsp " " RTOBJ \
+    # alwayslink libraries go first: their +load methods (a crash reporter…) run before all others
+    print "\t@clang++ -target arm64-apple-ios" MINIOS " -isysroot " SDK " -fuse-ld=lld" forceload " @" rsp " " RTOBJ \
           " -L" SDK "/usr/lib/swift -Wl,-rpath,/usr/lib/swift -Wl,-rpath,@executable_path/Frameworks" \
-          " -ObjC" forceload linkfw fl " " linkflags " " LDFLAGS " -o $@"
+          " -ObjC" linkfw fl " " linkflags " " LDFLAGS " -o $@"
     if (LDID != "") print "\t@" LDID " -S" ENT " $@"
 }

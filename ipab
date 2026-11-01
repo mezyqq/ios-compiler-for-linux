@@ -351,7 +351,16 @@ cmd_build() {
 	fi
 
 	# --- бандл (копируем только изменившееся, чтобы zip не перепаковывал лишнее)
-	cmp -s "$OBJ/$NAME" "$APP/$NAME" || cp "$OBJ/$NAME" "$APP/$NAME"
+	if [ $release = 1 ] && [ -n "$MANIFEST" ]; then
+		# release (MANIFEST): local symbols are stripped from the bundled copy only; the unstripped
+		# $OBJ/$NAME stays for symbolicating crash reports (llvm-symbolizer --obj=…)
+		if [ ! -f "$APP/$NAME" ] || [ "$OBJ/$NAME" -nt "$APP/$NAME" ]; then
+			"$TC/swift/usr/bin/llvm-objcopy" -x --strip-debug "$OBJ/$NAME" "$APP/$NAME" || die "strip не удался"
+			[ -x "$LDID" ] && { "$LDID" -S${ENTITLEMENTS:+"$PROJ/$ENTITLEMENTS"} "$APP/$NAME" || die "ldid не удался"; }
+		fi
+	else
+		cmp -s "$OBJ/$NAME" "$APP/$NAME" || cp "$OBJ/$NAME" "$APP/$NAME"
+	fi
 	write_info_plist "$B/Info.plist.tmp"
 	cmp -s "$B/Info.plist.tmp" "$APP/Info.plist" && rm "$B/Info.plist.tmp" || mv "$B/Info.plist.tmp" "$APP/Info.plist"
 	[ -f "$APP/PkgInfo" ] || printf 'APPL????' > "$APP/PkgInfo"
@@ -366,8 +375,11 @@ cmd_build() {
 		for x in AppIcon60x60@2x AppIcon60x60@3x AppIcon76x76@2x; do cp -u "$PROJ/$ICON" "$APP/$x.png"; done
 	fi
 	# --- .ipa
+	# only this app goes into Payload (a bundle left from an earlier NAME would ship as a second app)
+	for x in "$B"/Payload/*.app; do [ "$x" = "$APP" ] || rm -rf "$x"; done
 	local IPA=$B/$NAME.ipa
-	(cd "$B" && zip -q -r -FS -1 -X "$IPA" Payload) || die "zip не удался"
+	local zl=-1; [ $release = 1 ] && zl=-9
+	(cd "$B" && zip -q -r -FS $zl -X "$IPA" Payload) || die "zip не удался"
 	say "готово: $IPA ($(du -h "$IPA" | cut -f1))"
 	# release: записываем новую версию в ipa.conf, в releases/ остаётся только свежий <имя>-<версия>.ipa
 	if [ $release = 1 ]; then
@@ -655,7 +667,8 @@ build_manifest() {
 	export IPAB_DEVELOPER_DIR=$DEV
 
 	local OPTC="-O0 -g0" OPTS="-Onone"
-	[ $release = 1 ] && { OPTC="-Os -g0"; OPTS="-O"; }
+	# release: SWIFT_OPT=-Osize in ipa.conf trades a little speed for a much smaller binary
+	[ $release = 1 ] && { OPTC="-Os -g0"; OPTS="${SWIFT_OPT:--O}"; LDFLAGS="$LDFLAGS -Wl,-dead_strip"; }
 	mstamp() { printf '%s\n' "$2" > "$OBJ/$1.tmp"; cmp -s "$OBJ/$1.tmp" "$OBJ/$1" && rm "$OBJ/$1.tmp" || mv "$OBJ/$1.tmp" "$OBJ/$1"; }
 	mstamp cflags.stamp "$SDK $MIN_IOS $OPTC $CFLAGS"
 	mstamp swflags.stamp "$SDK $MIN_IOS $OPTS $SWIFT_THREADS $SWIFTFLAGS"
