@@ -156,6 +156,18 @@ EOF
 # ---------------------------------------------------------------- build
 plist_escape() { local s=$1; s=${s//&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; printf '%s' "$s"; }
 
+# ORIENTATIONS in ipa.conf: "portrait" / "landscape" keep only those from the given list; empty = all
+orientations() {
+	local o
+	for o in $1; do
+		case ${ORIENTATIONS:-} in
+		portrait) [[ $o == Portrait* ]] || continue ;;
+		landscape) [[ $o == Landscape* ]] || continue ;;
+		esac
+		printf '\t\t<string>UIInterfaceOrientation%s</string>\n' "$o"
+	done
+}
+
 write_info_plist() {
 	local out=$1 sdkver; sdkver=$(basename "$SDK" .sdk); sdkver=${sdkver#iPhoneOS}
 	if [ -f "$PROJ/Info.plist" ]; then cp "$PROJ/Info.plist" "$out"; return; fi
@@ -198,16 +210,11 @@ write_info_plist() {
 	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
+$(orientations "Portrait LandscapeLeft LandscapeRight")
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
+$(orientations "Portrait PortraitUpsideDown LandscapeLeft LandscapeRight")
 	</array>
 $icon
 $extra
@@ -225,7 +232,7 @@ cmd_build() {
 
 	NAME="" BUNDLE_ID="" VERSION=1.0 BUILD=1 MIN_IOS=15.0 FRAMEWORKS="Foundation UIKit" LIBS=""
 	CFLAGS="" SWIFTFLAGS="" LDFLAGS="" BRIDGING_HEADER="" ICON="" ENTITLEMENTS="" DISPLAY_NAME="" RELEASES="" EXTRA_RES=""
-	MANIFEST="" ROOTS="" SRCROOT="" EXTDIR="" PREBUILD="" SWIFT_THREADS=4 GENRULES="" GENRULE_OVERRIDES="" GENRULE_SED="" RESOURCES=""
+	ORIENTATIONS="" MANIFEST="" ROOTS="" SRCROOT="" EXTDIR="" PREBUILD="" SWIFT_THREADS=4 GENRULES="" GENRULE_OVERRIDES="" GENRULE_SED="" RESOURCES=""
 	# shellcheck disable=SC1091
 	. "$PROJ/ipa.conf"
 	[ -n "$NAME" ] || die "NAME пустой в ipa.conf"
